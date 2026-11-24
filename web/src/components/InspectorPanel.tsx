@@ -221,12 +221,14 @@ export function InspectorPanel({
 
   const [newChecklistText, setNewChecklistText] = useState('');
   const [feedback, setFeedback] = useState('');
+  const [editingFeedback, setEditingFeedback] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setEditing(false);
+    setEditingFeedback(false);
     setConfirmingDelete(false);
     setError(null);
     setNewChecklistText('');
@@ -393,6 +395,22 @@ export function InspectorPanel({
     }
   };
 
+  const handleSaveNote = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await patchNode(projectId, node.id, {
+        human_feedback: feedback.trim(),
+      });
+      onNodeUpdated(updated);
+      setEditingFeedback(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save feedback.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleRequestRevision = async () => {
     const trimmed = feedback.trim();
     if (!trimmed) {
@@ -404,6 +422,7 @@ export function InspectorPanel({
     try {
       const updated = await requestNodeRevision(projectId, node.id, trimmed);
       onNodeUpdated(updated);
+      setEditingFeedback(false);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : 'Failed to request revision.'
@@ -791,42 +810,126 @@ export function InspectorPanel({
       </div>
 
       <div className="rounded-lg border border-[#272B36] bg-[#181B22] p-4">
-        <label
-          htmlFor="human-feedback-input"
-          className="mb-2 flex items-center gap-1.5 text-[13px] font-semibold text-[#E6E8EE]"
-        >
-          <MessageSquareWarning className="h-3.5 w-3.5 text-[#E5A93C]" />
-          <span>Human Review &amp; Feedback</span>
-        </label>
-        <textarea
-          id="human-feedback-input"
-          rows={3}
-          value={feedback}
-          onChange={(e) => setFeedback(e.target.value)}
-          placeholder="Notes or revision instructions passed back to the AI agent on next start_node / get_node_context"
-          className="w-full rounded border border-[#272B36] bg-[#111318] px-3 py-2 text-[13px] text-[#E6E8EE] placeholder-[#6E768A] focus:border-[#6384FF] focus:outline-none"
-        />
+        {node.status === 'done' ? (
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-[13px] font-semibold text-[#E6E8EE]">
+                <CheckCircle2 className="h-4 w-4 text-[#3ECF8E]" />
+                <span>Approved</span>
+              </div>
+              <span className="rounded border border-[#3ECF8E]/35 bg-[#3ECF8E]/12 px-2 py-0.5 text-[11px] font-medium text-[#64DFA8]">
+                Approved — node marked done.
+              </span>
+            </div>
+            {node.human_feedback.trim() && (
+              <div className="rounded border border-[#272B36] bg-[#111318] px-3 py-2 text-[12px] text-[#8B92A5]">
+                <span className="font-medium text-[#E6E8EE]">Saved note: </span>
+                <span className="whitespace-pre-wrap">{node.human_feedback}</span>
+              </div>
+            )}
+          </div>
+        ) : node.status === 'in_progress' &&
+          node.human_feedback.trim() &&
+          !editingFeedback ? (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-[13px] font-semibold text-[#F0BE63]">
+                <RotateCcw className="h-3.5 w-3.5 text-[#E5A93C]" />
+                <span>Revision requested — awaiting AI resubmission</span>
+              </div>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setEditingFeedback(true)}
+                className="inline-flex h-7 items-center gap-1 rounded border border-[#272B36] bg-[#111318] px-2 text-[11px] font-medium text-[#E6E8EE] transition-colors hover:bg-[#1F242E]"
+              >
+                <Edit3 className="h-3 w-3 text-[#8B92A5]" />
+                <span>Edit feedback</span>
+              </button>
+            </div>
+            <p className="whitespace-pre-wrap rounded border border-[#E5A93C]/35 bg-[#E5A93C]/10 px-3 py-2 text-[13px] leading-relaxed text-[#E6E8EE]">
+              {node.human_feedback}
+            </p>
+          </div>
+        ) : (
+          <>
+            <label
+              htmlFor="human-feedback-input"
+              className="mb-2 flex items-center gap-1.5 text-[13px] font-semibold text-[#E6E8EE]"
+            >
+              <MessageSquareWarning className="h-3.5 w-3.5 text-[#E5A93C]" />
+              <span>
+                {node.status === 'planned'
+                  ? 'Reviewer Notes'
+                  : 'Human Review & Feedback'}
+              </span>
+            </label>
+            <textarea
+              id="human-feedback-input"
+              rows={3}
+              value={feedback}
+              onChange={(e) => setFeedback(e.target.value)}
+              placeholder={
+                node.status === 'planned'
+                  ? 'Pre-execution notes attached to this planned node for the AI agent'
+                  : 'Notes or revision instructions passed back to the AI agent on next start_node / get_node_context'
+              }
+              className="w-full rounded border border-[#272B36] bg-[#111318] px-3 py-2 text-[13px] text-[#E6E8EE] placeholder-[#6E768A] focus:border-[#6384FF] focus:outline-none"
+            />
 
-        <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={handleRequestRevision}
-            className="inline-flex h-8 items-center gap-1.5 rounded border border-[#E5A93C]/45 bg-[#E5A93C]/12 px-3 text-[12px] font-medium text-[#F0BE63] transition-colors hover:bg-[#E5A93C]/20 disabled:opacity-50"
-          >
-            <RotateCcw className="h-3.5 w-3.5" />
-            <span>Request Revision</span>
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={handleApprove}
-            className="inline-flex h-8 items-center gap-1.5 rounded bg-[#3ECF8E] px-3.5 text-[12px] font-semibold text-[#111318] transition-colors hover:bg-[#53D99E] disabled:opacity-50"
-          >
-            <CheckCircle2 className="h-3.5 w-3.5" />
-            <span>Approve (Done)</span>
-          </button>
-        </div>
+            <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+              {node.status === 'needs_review' ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={handleRequestRevision}
+                    className="inline-flex h-8 items-center gap-1.5 rounded border border-[#E5A93C]/45 bg-[#E5A93C]/12 px-3 text-[12px] font-medium text-[#F0BE63] transition-colors hover:bg-[#E5A93C]/20 disabled:opacity-50"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    <span>Request Revision</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={handleApprove}
+                    className="inline-flex h-8 items-center gap-1.5 rounded bg-[#3ECF8E] px-3.5 text-[12px] font-semibold text-[#111318] transition-colors hover:bg-[#53D99E] disabled:opacity-50"
+                  >
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    <span>Approve (Done)</span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  {node.status === 'in_progress' && editingFeedback && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => {
+                        setFeedback(node.human_feedback);
+                        setEditingFeedback(false);
+                      }}
+                      className="h-8 rounded border border-[#272B36] px-3 text-[12px] font-medium text-[#8B92A5] hover:bg-[#1F242E] hover:text-[#E6E8EE]"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={handleSaveNote}
+                    className="inline-flex h-8 items-center gap-1.5 rounded border border-[#272B36] bg-[#111318] px-3 text-[12px] font-medium text-[#E6E8EE] transition-colors hover:bg-[#1F242E] disabled:opacity-50"
+                  >
+                    <Save className="h-3.5 w-3.5 text-[#6384FF]" />
+                    <span>
+                      {node.status === 'planned' ? 'Save note' : 'Save feedback'}
+                    </span>
+                  </button>
+                </>
+              )}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

@@ -7,7 +7,8 @@
     "dev:server": "bun --watch server/index.ts",
     "dev:web": "bun x vite web",
     "build": "bun x vite build web",
-    "start": "bun run server/index.ts"
+    "start": "bun run server/index.ts",
+    "test": "bun test"
   },
   "dependencies": {
     "@hono/bun": "^1.0.1",
