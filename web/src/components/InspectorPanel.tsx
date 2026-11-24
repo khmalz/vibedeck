@@ -1,7 +1,9 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
+  Circle,
   Edit3,
   FileCode2,
   FileText,
@@ -214,10 +216,13 @@ export function InspectorPanel({
   onNodeDeleted,
 }: InspectorPanelProps) {
   const [editing, setEditing] = useState(false);
+  const [planExpanded, setPlanExpanded] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
+  const [draftStatus, setDraftStatus] = useState<NodeStatus>('planned');
   const [draftDescription, setDraftDescription] = useState('');
   const [draftScopeFiles, setDraftScopeFiles] = useState('');
   const [draftRules, setDraftRules] = useState('');
+  const [draftChecklist, setDraftChecklist] = useState<ChecklistItem[]>([]);
 
   const [newChecklistText, setNewChecklistText] = useState('');
   const [feedback, setFeedback] = useState('');
@@ -228,18 +233,22 @@ export function InspectorPanel({
 
   useEffect(() => {
     setEditing(false);
+    setPlanExpanded(false);
     setEditingFeedback(false);
     setConfirmingDelete(false);
     setError(null);
     setNewChecklistText('');
     setDraftTitle(node?.title ?? '');
+    setDraftStatus(node?.status ?? 'planned');
     setDraftDescription(node?.description ?? '');
     setDraftScopeFiles((node?.scope_files ?? []).join('\n'));
     setDraftRules(node?.rules ?? '');
+    setDraftChecklist(node?.checklist.map((item) => ({ ...item })) ?? []);
     setFeedback(node?.human_feedback ?? '');
   }, [node?.id]);
 
   const scopeFilesKey = node?.scope_files.join('\n') ?? '';
+  const checklistKey = JSON.stringify(node?.checklist ?? []);
 
   useEffect(() => {
     setFeedback(node?.human_feedback ?? '');
@@ -250,10 +259,21 @@ export function InspectorPanel({
       return;
     }
     setDraftTitle(node.title);
+    setDraftStatus(node.status);
     setDraftDescription(node.description);
     setDraftScopeFiles(scopeFilesKey);
     setDraftRules(node.rules);
-  }, [node?.id, node?.title, node?.description, scopeFilesKey, node?.rules, editing]);
+    setDraftChecklist(node.checklist.map((item) => ({ ...item })));
+  }, [
+    node?.id,
+    node?.title,
+    node?.status,
+    node?.description,
+    scopeFilesKey,
+    node?.rules,
+    checklistKey,
+    editing,
+  ]);
 
   if (!projectId || !node) {
     return (
@@ -271,23 +291,61 @@ export function InspectorPanel({
     );
   }
 
-  const checkedCount = node.checklist.filter((item) => item.checked).length;
+  const displayedChecklist = editing ? draftChecklist : node.checklist;
+  const checkedCount = displayedChecklist.filter((item) => item.checked).length;
 
-  const handleStatusChange = async (nextStatus: NodeStatus) => {
-    setBusy(true);
+  const handleStartEdit = () => {
+    setDraftTitle(node.title);
+    setDraftStatus(node.status);
+    setDraftDescription(node.description);
+    setDraftScopeFiles(node.scope_files.join('\n'));
+    setDraftRules(node.rules);
+    setDraftChecklist(node.checklist.map((item) => ({ ...item })));
+    setNewChecklistText('');
     setError(null);
-    try {
-      const updated = await patchNode(projectId, node.id, { status: nextStatus });
-      onNodeUpdated(updated);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update status.');
-    } finally {
-      setBusy(false);
-    }
+    setEditing(true);
   };
 
-  const handleSaveDetails = async (event: FormEvent) => {
-    event.preventDefault();
+  const handleCancelEdit = () => {
+    setDraftTitle(node.title);
+    setDraftStatus(node.status);
+    setDraftDescription(node.description);
+    setDraftScopeFiles(node.scope_files.join('\n'));
+    setDraftRules(node.rules);
+    setDraftChecklist(node.checklist.map((item) => ({ ...item })));
+    setNewChecklistText('');
+    setError(null);
+    setEditing(false);
+  };
+
+  const handleToggleDraftChecklist = (index: number) => {
+    setDraftChecklist((prev) =>
+      prev.map((item, idx) =>
+        idx === index ? { ...item, checked: !item.checked } : item
+      )
+    );
+  };
+
+  const handleEditDraftChecklistText = (index: number, text: string) => {
+    setDraftChecklist((prev) =>
+      prev.map((item, idx) => (idx === index ? { ...item, text } : item))
+    );
+  };
+
+  const handleRemoveDraftChecklist = (index: number) => {
+    setDraftChecklist((prev) => prev.filter((_, idx) => idx !== index));
+  };
+
+  const handleAddDraftChecklist = () => {
+    const trimmed = newChecklistText.trim();
+    if (!trimmed) {
+      return;
+    }
+    setDraftChecklist((prev) => [...prev, { text: trimmed, checked: false }]);
+    setNewChecklistText('');
+  };
+
+  const handleSaveDetails = async () => {
     const trimmedTitle = draftTitle.trim();
     if (!trimmedTitle) {
       setError('Title cannot be empty.');
@@ -299,84 +357,30 @@ export function InspectorPanel({
       .map((line) => line.trim())
       .filter(Boolean);
 
+    const pendingItem = newChecklistText.trim();
+    const finalChecklist: ChecklistItem[] = [
+      ...draftChecklist
+        .map((item) => ({ ...item, text: item.text.trim() }))
+        .filter((item) => item.text.length > 0),
+      ...(pendingItem ? [{ text: pendingItem, checked: false }] : []),
+    ];
+
     setBusy(true);
     setError(null);
     try {
       const updated = await patchNode(projectId, node.id, {
         title: trimmedTitle,
+        status: draftStatus,
         description: draftDescription,
         scope_files: parsedScopeFiles,
         rules: draftRules,
-      });
-      onNodeUpdated(updated);
-      setEditing(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save changes.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleToggleChecklist = async (index: number) => {
-    const nextChecklist: ChecklistItem[] = node.checklist.map((item, idx) =>
-      idx === index ? { ...item, checked: !item.checked } : item
-    );
-    setBusy(true);
-    setError(null);
-    try {
-      const updated = await patchNode(projectId, node.id, {
-        checklist: nextChecklist,
-      });
-      onNodeUpdated(updated);
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : 'Failed to update checklist.'
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleAddChecklistItem = async (event: FormEvent) => {
-    event.preventDefault();
-    const trimmed = newChecklistText.trim();
-    if (!trimmed) {
-      return;
-    }
-    const nextChecklist: ChecklistItem[] = [
-      ...node.checklist,
-      { text: trimmed, checked: false },
-    ];
-    setBusy(true);
-    setError(null);
-    try {
-      const updated = await patchNode(projectId, node.id, {
-        checklist: nextChecklist,
+        checklist: finalChecklist,
       });
       onNodeUpdated(updated);
       setNewChecklistText('');
+      setEditing(false);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : 'Failed to add checklist item.'
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleRemoveChecklistItem = async (index: number) => {
-    const nextChecklist = node.checklist.filter((_, idx) => idx !== index);
-    setBusy(true);
-    setError(null);
-    try {
-      const updated = await patchNode(projectId, node.id, {
-        checklist: nextChecklist,
-      });
-      onNodeUpdated(updated);
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : 'Failed to remove checklist item.'
-      );
+      setError(err instanceof Error ? err.message : 'Failed to save changes.');
     } finally {
       setBusy(false);
     }
@@ -479,10 +483,30 @@ export function InspectorPanel({
           </nav>
 
           <div className="flex items-center gap-1.5">
-            {!editing && (
+            {editing ? (
+              <>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={handleCancelEdit}
+                  className="inline-flex h-7 items-center rounded border border-[#272B36] px-2.5 text-[12px] font-medium text-[#8B92A5] transition-colors hover:bg-[#1F242E] hover:text-[#E6E8EE] disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={handleSaveDetails}
+                  className="inline-flex h-7 items-center gap-1 rounded bg-[#6384FF] px-2.5 text-[12px] font-medium text-[#111318] transition-colors hover:bg-[#7A96FF] disabled:opacity-50"
+                >
+                  <Save className="h-3 w-3" />
+                  <span>Save changes</span>
+                </button>
+              </>
+            ) : (
               <button
                 type="button"
-                onClick={() => setEditing(true)}
+                onClick={handleStartEdit}
                 className="inline-flex h-7 items-center gap-1 rounded border border-[#272B36] bg-[#111318] px-2 text-[12px] font-medium text-[#E6E8EE] transition-colors hover:bg-[#1F242E]"
               >
                 <Edit3 className="h-3 w-3 text-[#8B92A5]" />
@@ -545,19 +569,16 @@ export function InspectorPanel({
             </div>
           </div>
 
-          <select
-            aria-label="Node status"
-            disabled={busy}
-            value={node.status}
-            onChange={(e) => handleStatusChange(e.target.value as NodeStatus)}
-            className="h-8 rounded border border-[#272B36] bg-[#111318] px-2.5 text-[12px] font-medium text-[#E6E8EE] focus:border-[#6384FF] focus:outline-none disabled:opacity-50"
-          >
-            {(Object.keys(STATUS_META) as NodeStatus[]).map((statusKey) => (
-              <option key={statusKey} value={statusKey}>
-                {STATUS_META[statusKey].label}
-              </option>
-            ))}
-          </select>
+          {!editing && (
+            <span
+              className={`inline-flex items-center gap-1.5 rounded border px-2.5 py-1 text-[12px] font-medium ${STATUS_META[node.status].badge}`}
+            >
+              <span
+                className={`h-2 w-2 rounded-full ${STATUS_META[node.status].dot}`}
+              />
+              <span>{STATUS_META[node.status].label}</span>
+            </span>
+          )}
         </div>
 
         {error && (
@@ -567,22 +588,53 @@ export function InspectorPanel({
         )}
 
         {editing ? (
-          <form onSubmit={handleSaveDetails} className="mt-4 space-y-3 border-t border-[#272B36] pt-4">
-            <div>
-              <label
-                htmlFor="node-title-input"
-                className="mb-1 block text-[12px] font-medium text-[#8B92A5]"
-              >
-                Title
-              </label>
-              <input
-                id="node-title-input"
-                type="text"
-                required
-                value={draftTitle}
-                onChange={(e) => setDraftTitle(e.target.value)}
-                className="w-full rounded border border-[#272B36] bg-[#111318] px-3 py-1.5 text-[13px] text-[#E6E8EE] focus:border-[#6384FF] focus:outline-none"
-              />
+          <div className="mt-4 space-y-3 border-t border-[#272B36] pt-4">
+            {node.status === 'in_progress' && (
+              <p className="rounded border border-[#E5A93C]/35 bg-[#E5A93C]/10 px-3 py-2 text-[12px] text-[#F0BE63]">
+                This node is in progress — saved edits take effect on the agent&apos;s next read.
+              </p>
+            )}
+
+            <div className="grid gap-3 sm:grid-cols-[1fr_168px]">
+              <div>
+                <label
+                  htmlFor="node-title-input"
+                  className="mb-1 block text-[12px] font-medium text-[#8B92A5]"
+                >
+                  Title
+                </label>
+                <input
+                  id="node-title-input"
+                  type="text"
+                  required
+                  value={draftTitle}
+                  onChange={(e) => setDraftTitle(e.target.value)}
+                  className="w-full rounded border border-[#272B36] bg-[#111318] px-3 py-1.5 text-[13px] text-[#E6E8EE] focus:border-[#6384FF] focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="node-status-select"
+                  className="mb-1 block text-[12px] font-medium text-[#8B92A5]"
+                >
+                  Status
+                </label>
+                <select
+                  id="node-status-select"
+                  aria-label="Node status"
+                  disabled={busy}
+                  value={draftStatus}
+                  onChange={(e) => setDraftStatus(e.target.value as NodeStatus)}
+                  className="h-[34px] w-full rounded border border-[#272B36] bg-[#111318] px-2.5 text-[12px] font-medium text-[#E6E8EE] focus:border-[#6384FF] focus:outline-none disabled:opacity-50"
+                >
+                  {(Object.keys(STATUS_META) as NodeStatus[]).map((statusKey) => (
+                    <option key={statusKey} value={statusKey}>
+                      {STATUS_META[statusKey].label}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <div>
@@ -590,14 +642,15 @@ export function InspectorPanel({
                 htmlFor="node-description-input"
                 className="mb-1 block text-[12px] font-medium text-[#8B92A5]"
               >
-                Description (Markdown)
+                Plan &amp; Process (Markdown)
               </label>
               <textarea
                 id="node-description-input"
                 rows={4}
                 value={draftDescription}
                 onChange={(e) => setDraftDescription(e.target.value)}
-                className="w-full rounded border border-[#272B36] bg-[#111318] px-3 py-2 text-[13px] text-[#E6E8EE] focus:border-[#6384FF] focus:outline-none"
+                placeholder="Goal, step-by-step approach, and implementation notes"
+                className="w-full rounded border border-[#272B36] bg-[#111318] px-3 py-2 text-[13px] text-[#E6E8EE] placeholder-[#6E768A] focus:border-[#6384FF] focus:outline-none"
               />
             </div>
 
@@ -639,39 +692,59 @@ export function InspectorPanel({
               <button
                 type="button"
                 disabled={busy}
-                onClick={() => {
-                  setEditing(false);
-                  setDraftTitle(node.title);
-                  setDraftDescription(node.description);
-                  setDraftScopeFiles(node.scope_files.join('\n'));
-                  setDraftRules(node.rules);
-                }}
+                onClick={handleCancelEdit}
                 className="h-8 rounded border border-[#272B36] px-3 text-[12px] font-medium text-[#8B92A5] hover:bg-[#1F242E] hover:text-[#E6E8EE]"
               >
                 Cancel
               </button>
               <button
-                type="submit"
+                type="button"
                 disabled={busy}
+                onClick={handleSaveDetails}
                 className="inline-flex h-8 items-center gap-1.5 rounded bg-[#6384FF] px-3 text-[12px] font-medium text-[#111318] hover:bg-[#7A96FF] disabled:opacity-50"
               >
                 <Save className="h-3.5 w-3.5" />
                 <span>Save changes</span>
               </button>
             </div>
-          </form>
+          </div>
         ) : (
           <div className="mt-4 space-y-4 border-t border-[#272B36] pt-4">
-            <div>
-              <h3 className="mb-1.5 text-[12px] font-medium text-[#8B92A5]">
-                Description
-              </h3>
-              {node.description.trim() ? (
-                <MarkdownView content={node.description} />
-              ) : (
-                <p className="text-[13px] text-[#6E768A]">
-                  No description provided yet.
-                </p>
+            <div className="rounded border border-[#272B36] bg-[#111318]">
+              <button
+                type="button"
+                aria-expanded={planExpanded}
+                onClick={() => setPlanExpanded((prev) => !prev)}
+                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left transition-colors hover:bg-[#1F242E]/70"
+              >
+                <span className="flex items-center gap-1.5">
+                  {planExpanded ? (
+                    <ChevronDown className="h-3.5 w-3.5 text-[#8B92A5]" />
+                  ) : (
+                    <ChevronRight className="h-3.5 w-3.5 text-[#8B92A5]" />
+                  )}
+                  <span className="text-[12px] font-medium text-[#E6E8EE]">
+                    Plan &amp; Process
+                  </span>
+                </span>
+                <span className="text-[11px] text-[#6E768A]">
+                  {!node.description.trim()
+                    ? 'Empty'
+                    : planExpanded
+                      ? 'Hide'
+                      : 'Review'}
+                </span>
+              </button>
+              {planExpanded && (
+                <div className="border-t border-[#272B36] px-3 py-3">
+                  {node.description.trim() ? (
+                    <MarkdownView content={node.description} />
+                  ) : (
+                    <p className="text-[12px] text-[#6E768A]">
+                      No plan or process details written yet.
+                    </p>
+                  )}
+                </div>
               )}
             </div>
 
@@ -717,70 +790,130 @@ export function InspectorPanel({
             Checklist
           </h3>
           <span className="font-mono text-[11px] text-[#8B92A5]">
-            {checkedCount}/{node.checklist.length}
+            {checkedCount}/{displayedChecklist.length}
           </span>
         </div>
 
-        {node.checklist.length === 0 ? (
-          <p className="mb-2.5 text-[12px] text-[#6E768A]">
+        {editing ? (
+          <>
+            {draftChecklist.length === 0 ? (
+              <p className="mb-2.5 text-[12px] text-[#6E768A]">
+                No checklist items yet.
+              </p>
+            ) : (
+              <ul className="mb-3 space-y-1.5">
+                {draftChecklist.map((item, idx) => (
+                  <li
+                    key={idx}
+                    className="flex items-center gap-2 rounded px-1.5 py-1 hover:bg-[#1F242E]/70"
+                  >
+                    <input
+                      type="checkbox"
+                      disabled={busy}
+                      checked={item.checked}
+                      onChange={() => handleToggleDraftChecklist(idx)}
+                      aria-label={`Toggle ${item.text || `item ${idx + 1}`}`}
+                      className="h-3.5 w-3.5 shrink-0 rounded border-[#272B36] bg-[#111318] accent-[#3ECF8E]"
+                    />
+                    <input
+                      type="text"
+                      disabled={busy}
+                      value={item.text}
+                      onChange={(e) =>
+                        handleEditDraftChecklistText(idx, e.target.value)
+                      }
+                      aria-label={`Checklist item ${idx + 1}`}
+                      className="h-7 min-w-0 flex-1 rounded border border-[#272B36] bg-[#111318] px-2 text-[13px] text-[#E6E8EE] focus:border-[#6384FF] focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      disabled={busy}
+                      aria-label={`Remove ${item.text || `item ${idx + 1}`}`}
+                      onClick={() => handleRemoveDraftChecklist(idx)}
+                      className="rounded p-1 text-[#8B92A5] transition-colors hover:text-[#E06C75]"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                disabled={busy}
+                value={newChecklistText}
+                onChange={(e) => setNewChecklistText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleAddDraftChecklist();
+                  }
+                }}
+                placeholder="Add checklist item"
+                className="h-8 min-w-0 flex-1 rounded border border-[#272B36] bg-[#111318] px-2.5 text-[12px] text-[#E6E8EE] placeholder-[#6E768A] focus:border-[#6384FF] focus:outline-none"
+              />
+              <button
+                type="button"
+                disabled={busy || !newChecklistText.trim()}
+                onClick={handleAddDraftChecklist}
+                className="inline-flex h-8 items-center gap-1 rounded border border-[#272B36] bg-[#111318] px-2.5 text-[12px] font-medium text-[#E6E8EE] transition-colors hover:bg-[#1F242E] disabled:opacity-40"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>Add</span>
+              </button>
+            </div>
+
+            <div className="mt-3 flex justify-end gap-2 border-t border-[#272B36] pt-3">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={handleCancelEdit}
+                className="h-8 rounded border border-[#272B36] px-3 text-[12px] font-medium text-[#8B92A5] hover:bg-[#1F242E] hover:text-[#E6E8EE]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={handleSaveDetails}
+                className="inline-flex h-8 items-center gap-1.5 rounded bg-[#6384FF] px-3 text-[12px] font-medium text-[#111318] hover:bg-[#7A96FF] disabled:opacity-50"
+              >
+                <Save className="h-3.5 w-3.5" />
+                <span>Save changes</span>
+              </button>
+            </div>
+          </>
+        ) : node.checklist.length === 0 ? (
+          <p className="text-[12px] text-[#6E768A]">
             No checklist items yet.
           </p>
         ) : (
-          <ul className="mb-3 space-y-1.5">
+          <ul className="space-y-1.5">
             {node.checklist.map((item, idx) => (
               <li
                 key={`${idx}-${item.text}`}
-                className="group flex items-center justify-between gap-2 rounded px-1.5 py-1 hover:bg-[#1F242E]/70"
+                className="flex items-start gap-2.5 px-1 py-0.5"
               >
-                <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5">
-                  <input
-                    type="checkbox"
-                    disabled={busy}
-                    checked={item.checked}
-                    onChange={() => handleToggleChecklist(idx)}
-                    className="h-3.5 w-3.5 rounded border-[#272B36] bg-[#111318] accent-[#3ECF8E]"
-                  />
-                  <span
-                    className={`truncate text-[13px] ${
-                      item.checked
-                        ? 'text-[#6E768A] line-through'
-                        : 'text-[#E6E8EE]'
-                    }`}
-                  >
-                    {item.text}
-                  </span>
-                </label>
-                <button
-                  type="button"
-                  disabled={busy}
-                  aria-label={`Remove ${item.text}`}
-                  onClick={() => handleRemoveChecklistItem(idx)}
-                  className="rounded p-0.5 text-[#6E768A] opacity-0 transition-opacity group-hover:opacity-100 hover:text-[#E06C75] focus:opacity-100"
+                {item.checked ? (
+                  <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#3ECF8E]" />
+                ) : (
+                  <Circle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#6E768A]" />
+                )}
+                <span
+                  className={`text-[13px] ${
+                    item.checked
+                      ? 'text-[#6E768A] line-through'
+                      : 'text-[#E6E8EE]'
+                  }`}
                 >
-                  <X className="h-3.5 w-3.5" />
-                </button>
+                  {item.text}
+                </span>
               </li>
             ))}
           </ul>
         )}
-
-        <form onSubmit={handleAddChecklistItem} className="flex items-center gap-2">
-          <input
-            type="text"
-            value={newChecklistText}
-            onChange={(e) => setNewChecklistText(e.target.value)}
-            placeholder="Add checklist item"
-            className="h-8 min-w-0 flex-1 rounded border border-[#272B36] bg-[#111318] px-2.5 text-[12px] text-[#E6E8EE] placeholder-[#6E768A] focus:border-[#6384FF] focus:outline-none"
-          />
-          <button
-            type="submit"
-            disabled={busy || !newChecklistText.trim()}
-            className="inline-flex h-8 items-center gap-1 rounded border border-[#272B36] bg-[#111318] px-2.5 text-[12px] font-medium text-[#E6E8EE] transition-colors hover:bg-[#1F242E] disabled:opacity-40"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            <span>Add</span>
-          </button>
-        </form>
       </div>
 
       <div
@@ -860,7 +993,7 @@ export function InspectorPanel({
               <MessageSquareWarning className="h-3.5 w-3.5 text-[#E5A93C]" />
               <span>
                 {node.status === 'planned'
-                  ? 'Reviewer Notes'
+                  ? 'Plan & Process Feedback'
                   : 'Human Review & Feedback'}
               </span>
             </label>
@@ -871,7 +1004,7 @@ export function InspectorPanel({
               onChange={(e) => setFeedback(e.target.value)}
               placeholder={
                 node.status === 'planned'
-                  ? 'Pre-execution notes attached to this planned node for the AI agent'
+                  ? 'Feedback or adjustments on the planned approach before the AI calls start_node'
                   : 'Notes or revision instructions passed back to the AI agent on next start_node / get_node_context'
               }
               className="w-full rounded border border-[#272B36] bg-[#111318] px-3 py-2 text-[13px] text-[#E6E8EE] placeholder-[#6E768A] focus:border-[#6384FF] focus:outline-none"
@@ -921,9 +1054,7 @@ export function InspectorPanel({
                     className="inline-flex h-8 items-center gap-1.5 rounded border border-[#272B36] bg-[#111318] px-3 text-[12px] font-medium text-[#E6E8EE] transition-colors hover:bg-[#1F242E] disabled:opacity-50"
                   >
                     <Save className="h-3.5 w-3.5 text-[#6384FF]" />
-                    <span>
-                      {node.status === 'planned' ? 'Save note' : 'Save feedback'}
-                    </span>
+                    <span>Save feedback</span>
                   </button>
                 </>
               )}

@@ -97,7 +97,7 @@ export function registerProjectTools(
     {
       title: 'Upsert Plan',
       description:
-        'Create or update a grouped hierarchical plan (module -> submodule -> task) inside a single transaction.',
+        'Create or update a grouped hierarchical plan (module -> submodule -> task) inside a single transaction. Put each node\'s goal and step-by-step process in `description`.',
       inputSchema: UpsertPlanInputSchema,
       annotations: {
         readOnlyHint: false,
