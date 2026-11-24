@@ -6,6 +6,6 @@ web/dist/
 *.db-shm
 .DS_Store
 
-# Personal/local agent rules (keep shared project rules in AGENTS.md)
-.agents/rules/token.md
-.agents/rules/*.local.md
+# Local agent rules, installed skills, and skills lockfile
+.agents/
+skills-lock.json
