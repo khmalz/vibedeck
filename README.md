@@ -122,4 +122,3 @@ vibedeck/
 - [docs/PRD.md](./docs/PRD.md) — Product requirements and v0.1 scope
 - [docs/SPEC.md](./docs/SPEC.md) — Database schema, MCP contract, REST/SSE API, and UI design tokens
 - [docs/TECH_NOTES.md](./docs/TECH_NOTES.md) — Verified SDK and library usage notes
-- [CONTRIBUTING.md](./CONTRIBUTING.md) — Setup, testing, and PR checklist
