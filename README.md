@@ -93,12 +93,10 @@ bun test
 ```text
 vibedeck/
 ├── AGENTS.md                 # Shared agent & contributor rules and architecture invariants
-├── CONTRIBUTING.md           # Local setup, PR verification, and commit guidelines
 ├── README.md
 ├── .env.example              # Sample PORT and VIBEDECK_DB_PATH configuration
 ├── package.json
 ├── docs/                     # PRD, technical spec, verified tech notes, and build plan
-├── .agents/skills/           # Installed agent skills (tracked in skills-lock.json)
 ├── server/
 │   ├── index.ts              # Bun + Hono entry point (API, MCP, SSE, static UI)
 │   ├── types.ts              # Shared TypeScript types & Zod schemas
@@ -116,10 +114,9 @@ vibedeck/
 
 ---
 
-## Documentation & Contributing
+## Documentation
 
 - [AGENTS.md](./AGENTS.md) — Shared rules, runtime constraints, and architectural invariants
 - [docs/PRD.md](./docs/PRD.md) — Product requirements and v0.1 scope
 - [docs/SPEC.md](./docs/SPEC.md) — Database schema, MCP contract, REST/SSE API, and UI design tokens
 - [docs/TECH_NOTES.md](./docs/TECH_NOTES.md) — Verified SDK and library usage notes
-- [CONTRIBUTING.md](./CONTRIBUTING.md) — Setup, testing, and PR checklist
