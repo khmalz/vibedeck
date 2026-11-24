@@ -237,25 +237,21 @@ export function InspectorPanel({
     setFeedback(node?.human_feedback ?? '');
   }, [node?.id]);
 
+  const scopeFilesKey = node?.scope_files.join('\n') ?? '';
+
   useEffect(() => {
-    if (!node) {
+    setFeedback(node?.human_feedback ?? '');
+  }, [node?.id, node?.human_feedback]);
+
+  useEffect(() => {
+    if (!node || editing) {
       return;
     }
-    setFeedback(node.human_feedback);
-    if (!editing) {
-      setDraftTitle(node.title);
-      setDraftDescription(node.description);
-      setDraftScopeFiles(node.scope_files.join('\n'));
-      setDraftRules(node.rules);
-    }
-  }, [
-    node?.title,
-    node?.description,
-    node?.scope_files,
-    node?.rules,
-    node?.human_feedback,
-    editing,
-  ]);
+    setDraftTitle(node.title);
+    setDraftDescription(node.description);
+    setDraftScopeFiles(scopeFilesKey);
+    setDraftRules(node.rules);
+  }, [node?.id, node?.title, node?.description, scopeFilesKey, node?.rules, editing]);
 
   if (!projectId || !node) {
     return (
