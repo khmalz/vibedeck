@@ -3,8 +3,13 @@
 ## 1. Repository Structure
 ```text
 vibedeck/
+├── AGENTS.md                 # Shared agent & contributor rules
+├── CONTRIBUTING.md           # Contributor setup & PR checklist
+├── README.md
+├── .env.example              # Sample environment variables
 ├── package.json              # Root scripts (dev:server, dev:web, build, start)
-├── .agents/                  # Agent rules, skills, and documentation
+├── docs/                     # PRD, technical spec, tech notes, and build plan
+├── .agents/skills/           # Installed agent skills (tracked in skills-lock.json)
 ├── server/
 │   ├── index.ts              # Bun + Hono entry point (API, MCP, SSE, static UI)
 │   ├── db/

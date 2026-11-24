@@ -5,3 +5,7 @@ web/dist/
 *.db-wal
 *.db-shm
 .DS_Store
+
+# Personal/local agent rules (keep shared project rules in AGENTS.md)
+.agents/rules/token.md
+.agents/rules/*.local.md

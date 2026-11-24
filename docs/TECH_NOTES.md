@@ -6,7 +6,7 @@ Concise API signatures, imports, and minimal working snippets verified against o
 
 ## 1. `@modelcontextprotocol/sdk` — Streamable HTTP & `McpServer`
 
-> Note: Per `.agents/rules/vibedeck.md`, inspect the exact installed exports in `node_modules/@modelcontextprotocol/sdk` before implementing. (v1.x publishes under `@modelcontextprotocol/sdk/*`; v2 splits into `@modelcontextprotocol/server`.)
+> Note: Per `AGENTS.md`, inspect the exact installed exports in `node_modules/@modelcontextprotocol/sdk` before implementing. (v1.x publishes under `@modelcontextprotocol/sdk/*`; v2 splits into `@modelcontextprotocol/server`.)
 
 ### Server Initialization with `instructions`
 ```ts
