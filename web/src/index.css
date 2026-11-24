@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+@theme {
+  --color-obsidian-bg: #111318;
+  --color-obsidian-surface: #181B22;
+  --color-obsidian-elevated: #1F242E;
+  --color-obsidian-border: #272B36;
+  --color-obsidian-text: #E6E8EE;
+  --color-obsidian-muted: #8B92A5;
+  --color-status-progress: #6384FF;
+  --color-status-review: #E5A93C;
+  --color-status-done: #3ECF8E;
+  --color-status-planned: #6E768A;
+  --color-badge-revision: #E06C75;
+  --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    background-color: #111318;
+    color: #E6E8EE;
+    font-family: var(--font-sans);
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #272B36 transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: #272B36;
+    border-radius: 3px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: #363C4A;
+  }
+}
