@@ -9,6 +9,7 @@ import type {
   NodeWithAncestors,
   PlanNode,
   Project,
+  ProjectExportBundle,
   ProjectTree,
   ReviewHistoryEntry,
   ReviewHistoryType,
@@ -803,6 +804,239 @@ export function upsertPlan(
       created,
       updated,
       maxNonRevisionDepth,
+    };
+  });
+
+  return run();
+}
+
+/** Export a single project's full tree, checklist states, and review timeline as a portable bundle. */
+export function exportProjectBundle(
+  projectId: string,
+  database: Database = db
+): ProjectExportBundle | null {
+  const tree = getProjectTree(projectId, database);
+  if (!tree) {
+    return null;
+  }
+
+  return {
+    format: 'vibedeck-project-export',
+    schema_version: 1,
+    app_version: '0.1.2',
+    exported_at: nowIso(),
+    project: tree.project,
+    groups: tree.groups,
+    nodes: tree.nodes,
+  };
+}
+
+export interface ImportProjectResult {
+  project: Project;
+  imported_groups: number;
+  imported_nodes: number;
+  id_remapped: boolean;
+}
+
+/** Import a project export bundle atomically, preserving IDs when free or remapping on collision. */
+export function importProjectBundle(
+  bundle: ProjectExportBundle,
+  database: Database = db
+): ImportProjectResult {
+  const run = database.transaction((): ImportProjectResult => {
+    const now = nowIso();
+    let idRemapped = false;
+
+    const requestedProjectId = bundle.project.id?.trim();
+    let targetProjectId: string;
+    if (requestedProjectId && !getProjectById(requestedProjectId, database)) {
+      targetProjectId = requestedProjectId;
+    } else {
+      targetProjectId = crypto.randomUUID();
+      if (requestedProjectId) {
+        idRemapped = true;
+      }
+    }
+
+    database
+      .query<
+        unknown,
+        {
+          $id: string;
+          $name: string;
+          $summary: string;
+          $createdAt: string;
+          $updatedAt: string;
+        }
+      >(
+        `INSERT INTO projects (id, name, summary, created_at, updated_at)
+         VALUES ($id, $name, $summary, $createdAt, $updatedAt)`
+      )
+      .run({
+        $id: targetProjectId,
+        $name: bundle.project.name,
+        $summary: bundle.project.summary ?? '',
+        $createdAt: bundle.project.created_at ?? now,
+        $updatedAt: bundle.project.updated_at ?? now,
+      });
+
+    const groupExistsStmt = database.prepare<{ found: number }, { $id: string }>(
+      'SELECT 1 AS found FROM groups WHERE id = $id LIMIT 1'
+    );
+    const insertGroupStmt = database.prepare<
+      unknown,
+      {
+        $id: string;
+        $projectId: string;
+        $name: string;
+        $sortOrder: number;
+        $createdAt: string;
+      }
+    >(
+      `INSERT INTO groups (id, project_id, name, sort_order, created_at)
+       VALUES ($id, $projectId, $name, $sortOrder, $createdAt)`
+    );
+
+    const groupIdMap = new Map<string, string>();
+    try {
+      for (const group of bundle.groups) {
+        const collision = Boolean(groupExistsStmt.get({ $id: group.id }));
+        const targetGroupId =
+          !idRemapped && !collision ? group.id : crypto.randomUUID();
+        if (targetGroupId !== group.id) {
+          idRemapped = true;
+        }
+        groupIdMap.set(group.id, targetGroupId);
+        insertGroupStmt.run({
+          $id: targetGroupId,
+          $projectId: targetProjectId,
+          $name: group.name,
+          $sortOrder: group.sort_order ?? 0,
+          $createdAt: group.created_at ?? now,
+        });
+      }
+    } finally {
+      groupExistsStmt.finalize();
+      insertGroupStmt.finalize();
+    }
+
+    const nodeExistsStmt = database.prepare<{ found: number }, { $id: string }>(
+      'SELECT 1 AS found FROM nodes WHERE id = $id LIMIT 1'
+    );
+    const insertNodeStmt = database.prepare<
+      unknown,
+      {
+        $id: string;
+        $projectId: string;
+        $groupId: string | null;
+        $parentId: string | null;
+        $nodeType: NodeType;
+        $title: string;
+        $description: string;
+        $status: NodeStatus;
+        $scopeFiles: string;
+        $rules: string;
+        $checklist: string;
+        $aiReport: string;
+        $humanFeedback: string;
+        $reviewHistory: string;
+        $sortOrder: number;
+        $createdAt: string;
+        $updatedAt: string;
+      }
+    >(
+      `INSERT INTO nodes (
+         id, project_id, group_id, parent_id, node_type, title, description,
+         status, scope_files, rules, checklist, ai_report, human_feedback,
+         review_history, sort_order, created_at, updated_at
+       ) VALUES (
+         $id, $projectId, $groupId, $parentId, $nodeType, $title, $description,
+         $status, $scopeFiles, $rules, $checklist, $aiReport, $humanFeedback,
+         $reviewHistory, $sortOrder, $createdAt, $updatedAt
+       )`
+    );
+
+    const nodeIdMap = new Map<string, string>();
+    try {
+      for (const node of bundle.nodes) {
+        const collision = Boolean(nodeExistsStmt.get({ $id: node.id }));
+        const targetNodeId =
+          !idRemapped && !collision ? node.id : crypto.randomUUID();
+        if (targetNodeId !== node.id) {
+          idRemapped = true;
+        }
+        nodeIdMap.set(node.id, targetNodeId);
+      }
+
+      const insertedOldIds = new Set<string>();
+      let pending = [...bundle.nodes];
+
+      while (pending.length > 0) {
+        const ready: typeof pending = [];
+        const deferred: typeof pending = [];
+
+        for (const node of pending) {
+          if (
+            node.parent_id === null ||
+            !nodeIdMap.has(node.parent_id) ||
+            insertedOldIds.has(node.parent_id)
+          ) {
+            ready.push(node);
+          } else {
+            deferred.push(node);
+          }
+        }
+
+        if (ready.length === 0) {
+          ready.push(deferred.shift()!);
+        }
+
+        for (const node of ready) {
+          const targetNodeId = nodeIdMap.get(node.id)!;
+          const targetGroupId = node.group_id
+            ? (groupIdMap.get(node.group_id) ?? null)
+            : null;
+          const targetParentId =
+            node.parent_id &&
+            nodeIdMap.has(node.parent_id) &&
+            insertedOldIds.has(node.parent_id)
+              ? nodeIdMap.get(node.parent_id)!
+              : null;
+
+          insertNodeStmt.run({
+            $id: targetNodeId,
+            $projectId: targetProjectId,
+            $groupId: targetGroupId,
+            $parentId: targetParentId,
+            $nodeType: node.node_type,
+            $title: node.title,
+            $description: node.description ?? '',
+            $status: node.status ?? 'planned',
+            $scopeFiles: JSON.stringify(node.scope_files ?? []),
+            $rules: node.rules ?? '',
+            $checklist: JSON.stringify(node.checklist ?? []),
+            $aiReport: node.ai_report ?? '',
+            $humanFeedback: node.human_feedback ?? '',
+            $reviewHistory: JSON.stringify(node.review_history ?? []),
+            $sortOrder: node.sort_order ?? 0,
+            $createdAt: node.created_at ?? now,
+            $updatedAt: node.updated_at ?? now,
+          });
+          insertedOldIds.add(node.id);
+        }
+
+        pending = deferred;
+      }
+    } finally {
+      nodeExistsStmt.finalize();
+      insertNodeStmt.finalize();
+    }
+
+    return {
+      project: getProjectById(targetProjectId, database)!,
+      imported_groups: bundle.groups.length,
+      imported_nodes: bundle.nodes.length,
+      id_remapped: idRemapped,
     };
   });
 

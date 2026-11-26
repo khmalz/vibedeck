@@ -9,9 +9,11 @@ import {
   deleteGroup,
   deleteNode,
   deleteProject,
+  exportProjectBundle,
   getNodeById,
   getProjectById,
   getProjectTree,
+  importProjectBundle,
   listProjects,
   requestRevisionOnNode,
   syncPatchedHumanFeedback,
@@ -22,6 +24,7 @@ import {
   CreateGroupSchema,
   CreateProjectSchema,
   PatchNodeSchema,
+  ProjectExportBundleSchema,
   RequestRevisionSchema,
 } from '../types';
 import { sseBroadcaster, type SseBroadcaster } from './sse';
@@ -76,6 +79,33 @@ export function createApiRoutes(
     }
     const project = createProject(parsed.data, database);
     return c.json({ project }, 201);
+  });
+
+  routes.post('/projects/import', async (c) => {
+    const parsed = await parseJsonBody(c, ProjectExportBundleSchema);
+    if (!parsed.ok) {
+      return parsed.response;
+    }
+    const result = importProjectBundle(parsed.data, database);
+    return c.json(result, 201);
+  });
+
+  routes.get('/projects/:projectId/export', (c) => {
+    const projectId = c.req.param('projectId');
+    const bundle = exportProjectBundle(projectId, database);
+    if (!bundle) {
+      return c.json({ error: `Project "${projectId}" not found.` }, 404);
+    }
+    const slug =
+      bundle.project.name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '') || 'project';
+    c.header(
+      'Content-Disposition',
+      `attachment; filename="vibedeck-${slug}.json"`
+    );
+    return c.json(bundle);
   });
 
   routes.delete('/projects/:projectId', (c) => {

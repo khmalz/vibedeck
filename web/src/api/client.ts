@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import type {
   ChecklistItem,
   Group,
+  ImportProjectResponse,
   NodeStatus,
   PlanNode,
   Project,
+  ProjectExportBundle,
   ProjectTree,
   SseConnectionState,
 } from '../types';
@@ -49,6 +51,24 @@ export async function createProject(input: {
 export async function deleteProject(projectId: string): Promise<void> {
   await requestJson<{ ok: boolean }>(`/api/projects/${encodeURIComponent(projectId)}`, {
     method: 'DELETE',
+  });
+}
+
+export async function exportProject(
+  projectId: string
+): Promise<ProjectExportBundle> {
+  return requestJson<ProjectExportBundle>(
+    `/api/projects/${encodeURIComponent(projectId)}/export`
+  );
+}
+
+export async function importProject(
+  bundle: unknown
+): Promise<ImportProjectResponse> {
+  return requestJson<ImportProjectResponse>('/api/projects/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(bundle),
   });
 }
 

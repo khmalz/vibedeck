@@ -162,3 +162,50 @@ export const ApproveNodeSchema = z.object({
   comment: z.string().optional(),
 });
 export type ApproveNodeInput = z.infer<typeof ApproveNodeSchema>;
+
+export const ProjectExportBundleSchema = z.object({
+  format: z.literal('vibedeck-project-export'),
+  schema_version: z.literal(1),
+  app_version: z.string().optional(),
+  exported_at: z.string().optional(),
+  project: z.object({
+    id: z.string().min(1).optional(),
+    name: z.string().trim().min(1),
+    summary: z.string().optional().default(''),
+    created_at: z.string().optional(),
+    updated_at: z.string().optional(),
+  }),
+  groups: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        name: z.string().trim().min(1),
+        sort_order: z.number().int().optional().default(0),
+        created_at: z.string().optional(),
+      })
+    )
+    .default([]),
+  nodes: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        group_id: z.string().nullable().optional().default(null),
+        parent_id: z.string().nullable().optional().default(null),
+        node_type: NodeTypeSchema,
+        title: z.string().trim().min(1),
+        description: z.string().optional().default(''),
+        status: NodeStatusSchema.optional().default('planned'),
+        scope_files: z.array(z.string()).optional().default([]),
+        rules: z.string().optional().default(''),
+        checklist: z.array(ChecklistItemSchema).optional().default([]),
+        ai_report: z.string().optional().default(''),
+        human_feedback: z.string().optional().default(''),
+        review_history: z.array(ReviewHistoryEntrySchema).optional().default([]),
+        sort_order: z.number().int().optional().default(0),
+        created_at: z.string().optional(),
+        updated_at: z.string().optional(),
+      })
+    )
+    .default([]),
+});
+export type ProjectExportBundle = z.infer<typeof ProjectExportBundleSchema>;

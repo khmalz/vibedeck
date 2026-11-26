@@ -47,10 +47,12 @@ function buildConfigTemplates(mcpUrl: string) {
         {
           $schema: 'https://opencode.ai/config.json',
           mcp: {
-            vibedeck: {
-              type: 'remote',
-              url: mcpUrl,
-              enabled: true,
+            servers: {
+              vibedeck: {
+                type: 'remote',
+                url: mcpUrl,
+                oauth: false,
+              },
             },
           },
         },
@@ -65,7 +67,7 @@ function buildConfigTemplates(mcpUrl: string) {
         {
           mcpServers: {
             vibedeck: {
-              serverUrl: mcpUrl,
+              url: mcpUrl,
             },
           },
         },
@@ -93,7 +95,9 @@ export function AddProjectModal({
     initialProject
   );
   const [activeTab, setActiveTab] = useState<ConfigTabKey>('claude');
-  const [copiedField, setCopiedField] = useState<'url' | 'config' | null>(null);
+  const [copiedField, setCopiedField] = useState<
+    'url' | 'config' | 'cli' | null
+  >(null);
 
   useEffect(() => {
     if (!open) {
@@ -129,6 +133,37 @@ export function AddProjectModal({
   }, [activeProject]);
 
   const templates = useMemo(() => buildConfigTemplates(mcpUrl), [mcpUrl]);
+  const cliInfo = useMemo(() => {
+    if (!mcpUrl) {
+      return null;
+    }
+    if (activeTab === 'claude') {
+      return {
+        hint: (
+          <>
+            CLI (local scope in{' '}
+            <code className="font-mono text-[#E6E8EE]">~/.claude.json</code>
+            , without creating{' '}
+            <code className="font-mono text-[#E6E8EE]">.mcp.json</code>)
+          </>
+        ),
+        command: `claude mcp add --transport http vibedeck ${mcpUrl}`,
+      };
+    }
+    if (activeTab === 'opencode') {
+      return {
+        hint: (
+          <>
+            CLI (writes to project config; pass{' '}
+            <code className="font-mono text-[#E6E8EE]">--global</code> for
+            global)
+          </>
+        ),
+        command: `opencode mcp add vibedeck --url ${mcpUrl}`,
+      };
+    }
+    return null;
+  }, [activeTab, mcpUrl]);
 
   if (!open) {
     return null;
@@ -158,7 +193,10 @@ export function AddProjectModal({
     }
   };
 
-  const handleCopy = async (text: string, field: 'url' | 'config') => {
+  const handleCopy = async (
+    text: string,
+    field: 'url' | 'config' | 'cli'
+  ) => {
     try {
       await navigator.clipboard.writeText(text);
       setCopiedField(field);
@@ -335,6 +373,36 @@ export function AddProjectModal({
                   );
                 })}
               </div>
+
+              {cliInfo && (
+                <div className="mt-3 rounded border border-[#272B36] bg-[#111318]">
+                  <div className="flex items-center justify-between gap-2 border-b border-[#272B36] px-3 py-2">
+                    <span className="text-[11px] text-[#8B92A5]">
+                      {cliInfo.hint}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleCopy(cliInfo.command, 'cli')}
+                      className="inline-flex shrink-0 items-center gap-1 rounded border border-[#272B36] bg-[#181B22] px-2 py-1 text-[11px] font-medium text-[#E6E8EE] transition-colors hover:bg-[#1F242E]"
+                    >
+                      {copiedField === 'cli' ? (
+                        <>
+                          <Check className="h-3 w-3 text-[#3ECF8E]" />
+                          <span>Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3 w-3 text-[#8B92A5]" />
+                          <span>Copy CLI</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                  <pre className="overflow-x-auto px-3 py-2 font-mono text-[12px] text-[#E6E8EE]">
+                    {cliInfo.command}
+                  </pre>
+                </div>
+              )}
 
               <div className="mt-3 rounded border border-[#272B36] bg-[#111318]">
                 <div className="flex items-center justify-between border-b border-[#272B36] px-3 py-2">

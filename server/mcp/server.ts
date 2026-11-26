@@ -11,7 +11,7 @@ export function createProjectMcpServer(
   options?: McpToolOptions
 ): McpServer {
   const server = new McpServer(
-    { name: 'vibedeck', version: '0.1.0' },
+    { name: 'vibedeck', version: '0.1.2' },
     { instructions: VIBEDECK_MCP_INSTRUCTIONS }
   );
   registerProjectTools(server, projectId, options);

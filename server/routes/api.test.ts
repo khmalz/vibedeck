@@ -448,4 +448,137 @@ describe('REST API & SSE Live Broadcaster', () => {
       legacyDb.close(false);
     }
   });
+
+  test('exports full project history, restores deleted project with original IDs, and remaps IDs on duplicate import', async () => {
+    const created = await apiJson<{ project: Project }>('/api/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Archive Me', summary: 'Portable deck' }),
+    });
+    expect(created.status).toBe(201);
+    const proj = created.body.project;
+
+    await apiJson(`/mcp/${proj.id}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 100,
+        method: 'tools/call',
+        params: {
+          name: 'upsert_plan',
+          arguments: {
+            group_name: 'Phase 1',
+            nodes: [
+              {
+                node_type: 'module',
+                title: 'Parent Mod',
+                children: [
+                  {
+                    node_type: 'task',
+                    title: 'Leaf Task',
+                    checklist: ['Step 1'],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      }),
+    });
+
+    const treeBefore = (await apiJson<ProjectTree>(`/api/projects/${proj.id}/tree`)).body;
+    const leaf = treeBefore.nodes.find((n) => n.title === 'Leaf Task')!;
+
+    await apiJson(`/api/projects/${proj.id}/nodes/${leaf.id}/request-revision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ human_feedback: 'Keep export timeline intact' }),
+    });
+
+    const exportedRes = await fetch(`${baseUrl}/api/projects/${proj.id}/export`);
+    expect(exportedRes.status).toBe(200);
+    expect(exportedRes.headers.get('content-disposition')).toContain(
+      'vibedeck-archive-me.json'
+    );
+    const bundle = (await exportedRes.json()) as {
+      format: string;
+      schema_version: number;
+      project: Project;
+      groups: Group[];
+      nodes: PlanNode[];
+    };
+    expect(bundle.format).toBe('vibedeck-project-export');
+    expect(bundle.schema_version).toBe(1);
+    expect(bundle.nodes).toHaveLength(2);
+
+    // Reverse node order so child appears before parent to verify topological FK insert
+    const reversedBundle = {
+      ...bundle,
+      nodes: [...bundle.nodes].reverse(),
+    };
+
+    // Delete original project -> restore with original IDs (id_remapped: false)
+    const deleted = await apiJson<{ ok: boolean }>(`/api/projects/${proj.id}`, {
+      method: 'DELETE',
+    });
+    expect(deleted.status).toBe(200);
+
+    const restored = await apiJson<{
+      project: Project;
+      imported_groups: number;
+      imported_nodes: number;
+      id_remapped: boolean;
+    }>('/api/projects/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(reversedBundle),
+    });
+    expect(restored.status).toBe(201);
+    expect(restored.body.project.id).toBe(proj.id);
+    expect(restored.body.id_remapped).toBe(false);
+    expect(restored.body.imported_groups).toBe(1);
+    expect(restored.body.imported_nodes).toBe(2);
+
+    const restoredTree = (await apiJson<ProjectTree>(`/api/projects/${proj.id}/tree`)).body;
+    const restoredLeaf = restoredTree.nodes.find((n) => n.title === 'Leaf Task')!;
+    expect(restoredLeaf.review_history).toHaveLength(1);
+    expect(restoredLeaf.review_history[0]?.content).toBe('Keep export timeline intact');
+
+    // Re-importing while original exists remaps IDs without collision
+    const duplicate = await apiJson<{
+      project: Project;
+      imported_groups: number;
+      imported_nodes: number;
+      id_remapped: boolean;
+    }>('/api/projects/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bundle),
+    });
+    expect(duplicate.status).toBe(201);
+    expect(duplicate.body.id_remapped).toBe(true);
+    expect(duplicate.body.project.id).not.toBe(proj.id);
+
+    const dupTree = (
+      await apiJson<ProjectTree>(`/api/projects/${duplicate.body.project.id}/tree`)
+    ).body;
+    expect(dupTree.nodes).toHaveLength(2);
+    const dupParent = dupTree.nodes.find((n) => n.title === 'Parent Mod')!;
+    const dupLeaf = dupTree.nodes.find((n) => n.title === 'Leaf Task')!;
+    expect(dupLeaf.parent_id).toBe(dupParent.id);
+
+    const badImport = await apiJson<{ error: string }>('/api/projects/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ format: 'wrong' }),
+    });
+    expect(badImport.status).toBe(400);
+
+    await apiJson(`/api/projects/${proj.id}`, { method: 'DELETE' });
+    await apiJson(`/api/projects/${duplicate.body.project.id}`, { method: 'DELETE' });
+  });
 });
