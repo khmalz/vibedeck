@@ -4,9 +4,11 @@ import {
   ChevronDown,
   ChevronRight,
   Circle,
+  Clock,
   Edit3,
   FileCode2,
   FileText,
+  GitBranch,
   MessageSquareWarning,
   Plus,
   RotateCcw,
@@ -22,7 +24,13 @@ import {
   patchNode,
   requestNodeRevision,
 } from '../api/client';
-import type { ChecklistItem, NodeStatus, PlanNode } from '../types';
+import type {
+  ChecklistItem,
+  NodeStatus,
+  PlanNode,
+  ReviewHistoryEntry,
+  ReviewHistoryType,
+} from '../types';
 import { STATUS_META, TYPE_META } from './TreeNodeItem';
 
 interface InspectorPanelProps {
@@ -227,6 +235,7 @@ export function InspectorPanel({
   const [newChecklistText, setNewChecklistText] = useState('');
   const [feedback, setFeedback] = useState('');
   const [editingFeedback, setEditingFeedback] = useState(false);
+  const [showAllHistory, setShowAllHistory] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -235,6 +244,7 @@ export function InspectorPanel({
     setEditing(false);
     setPlanExpanded(false);
     setEditingFeedback(false);
+    setShowAllHistory(false);
     setConfirmingDelete(false);
     setError(null);
     setNewChecklistText('');
@@ -390,8 +400,10 @@ export function InspectorPanel({
     setBusy(true);
     setError(null);
     try {
-      const updated = await approveNode(projectId, node.id);
+      const updated = await approveNode(projectId, node.id, feedback.trim() || undefined);
       onNodeUpdated(updated);
+      setFeedback('');
+      setEditingFeedback(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to approve node.');
     } finally {
@@ -426,6 +438,7 @@ export function InspectorPanel({
     try {
       const updated = await requestNodeRevision(projectId, node.id, trimmed);
       onNodeUpdated(updated);
+      setFeedback('');
       setEditingFeedback(false);
     } catch (err) {
       setError(
@@ -916,50 +929,177 @@ export function InspectorPanel({
         )}
       </div>
 
-      <div
-        className={`rounded-lg border bg-[#181B22] p-4 ${
-          node.status === 'needs_review'
-            ? 'border-[#E5A93C]/45'
-            : 'border-[#272B36]'
-        }`}
-      >
-        <h3 className="mb-2 flex items-center gap-1.5 text-[13px] font-semibold text-[#E6E8EE]">
-          <Sparkles
-            className={`h-3.5 w-3.5 ${
+      {(() => {
+        const timelineEntries: ReviewHistoryEntry[] =
+          node.review_history.length > 0
+            ? node.review_history
+            : node.ai_report.trim()
+              ? [
+                  {
+                    id: 'legacy-ai-report',
+                    type: 'ai_report',
+                    content: node.ai_report.trim(),
+                    created_at: node.updated_at,
+                  },
+                ]
+              : [];
+
+        const hiddenCount =
+          !showAllHistory && timelineEntries.length > 4
+            ? timelineEntries.length - 4
+            : 0;
+        const visibleEntries =
+          hiddenCount > 0 ? timelineEntries.slice(hiddenCount) : timelineEntries;
+
+        const entryMeta: Record<
+          ReviewHistoryType,
+          { label: string; dot: string; badge: string }
+        > = {
+          human_feedback: {
+            label: 'You · Feedback',
+            dot: 'bg-[#E5A93C]',
+            badge: 'border-[#E5A93C]/35 bg-[#E5A93C]/12 text-[#F0BE63]',
+          },
+          ai_plan: {
+            label: 'AI · Revision Plan',
+            dot: 'bg-[#6384FF]',
+            badge: 'border-[#6384FF]/35 bg-[#6384FF]/12 text-[#8EA7FF]',
+          },
+          ai_report: {
+            label: 'AI · Completion Report',
+            dot: 'bg-[#6384FF]',
+            badge: 'border-[#272B36] bg-[#111318] text-[#E6E8EE]',
+          },
+          approved: {
+            label: 'You · Approved',
+            dot: 'bg-[#3ECF8E]',
+            badge: 'border-[#3ECF8E]/35 bg-[#3ECF8E]/12 text-[#64DFA8]',
+          },
+        };
+
+        return (
+          <div
+            className={`rounded-lg border bg-[#181B22] p-4 ${
               node.status === 'needs_review'
-                ? 'text-[#E5A93C]'
-                : 'text-[#6384FF]'
+                ? 'border-[#E5A93C]/45'
+                : 'border-[#272B36]'
             }`}
-          />
-          <span>AI Report</span>
-        </h3>
-        {node.ai_report.trim() ? (
-          <MarkdownView content={node.ai_report} />
-        ) : (
-          <p className="text-[12px] text-[#6E768A]">
-            No AI completion report submitted yet.
-          </p>
-        )}
-      </div>
+          >
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <h3 className="flex items-center gap-1.5 text-[13px] font-semibold text-[#E6E8EE]">
+                <Clock
+                  className={`h-3.5 w-3.5 ${
+                    node.status === 'needs_review'
+                      ? 'text-[#E5A93C]'
+                      : 'text-[#6384FF]'
+                  }`}
+                />
+                <span>Review &amp; Revision Timeline</span>
+              </h3>
+              <span className="font-mono text-[11px] text-[#8B92A5]">
+                {timelineEntries.length}{' '}
+                {timelineEntries.length === 1 ? 'entry' : 'entries'}
+              </span>
+            </div>
+
+            {timelineEntries.length === 0 ? (
+              <p className="text-[12px] text-[#6E768A]">
+                No AI completion report or review activity yet.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {hiddenCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllHistory(true)}
+                    className="w-full rounded border border-[#272B36] bg-[#111318] px-3 py-1.5 text-[12px] font-medium text-[#8B92A5] transition-colors hover:bg-[#1F242E] hover:text-[#E6E8EE]"
+                  >
+                    Show {hiddenCount} earlier{' '}
+                    {hiddenCount === 1 ? 'entry' : 'entries'}
+                  </button>
+                )}
+
+                <div className="relative ml-2 space-y-3 border-l border-[#272B36] pl-4">
+                  {visibleEntries.map((entry, idx) => {
+                    const isLatestReport =
+                      idx === visibleEntries.length - 1 &&
+                      entry.type === 'ai_report' &&
+                      node.status === 'needs_review';
+                    const meta = entryMeta[entry.type];
+                    const timeLabel = new Date(entry.created_at).toLocaleString([], {
+                      month: 'short',
+                      day: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    });
+
+                    return (
+                      <div
+                        key={entry.id}
+                        className={`relative rounded border bg-[#111318] p-3 ${
+                          isLatestReport
+                            ? 'border-[#E5A93C]/45'
+                            : 'border-[#272B36]'
+                        }`}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={`absolute -left-[21px] top-3.5 h-2.5 w-2.5 rounded-full border-2 border-[#181B22] ${
+                            isLatestReport ? 'bg-[#E5A93C]' : meta.dot
+                          }`}
+                        />
+                        <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5">
+                            {entry.type === 'ai_report' && (
+                              <Sparkles
+                                className={`h-3 w-3 ${
+                                  isLatestReport ? 'text-[#E5A93C]' : 'text-[#6384FF]'
+                                }`}
+                              />
+                            )}
+                            {entry.type === 'ai_plan' && (
+                              <GitBranch className="h-3 w-3 text-[#6384FF]" />
+                            )}
+                            <span
+                              className={`rounded border px-1.5 py-0.5 text-[11px] font-medium leading-none ${
+                                isLatestReport
+                                  ? 'border-[#E5A93C]/45 bg-[#E5A93C]/12 text-[#F0BE63]'
+                                  : meta.badge
+                              }`}
+                            >
+                              {meta.label}
+                            </span>
+                            {isLatestReport && (
+                              <span className="rounded bg-[#E5A93C]/20 px-1.5 py-0.5 text-[10px] font-semibold text-[#F0BE63]">
+                                Latest
+                              </span>
+                            )}
+                          </div>
+                          <span className="font-mono text-[10px] text-[#6E768A]">
+                            {timeLabel}
+                          </span>
+                        </div>
+                        <MarkdownView content={entry.content} />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       <div className="rounded-lg border border-[#272B36] bg-[#181B22] p-4">
         {node.status === 'done' ? (
-          <div className="space-y-2.5">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 text-[13px] font-semibold text-[#E6E8EE]">
-                <CheckCircle2 className="h-4 w-4 text-[#3ECF8E]" />
-                <span>Approved</span>
-              </div>
-              <span className="rounded border border-[#3ECF8E]/35 bg-[#3ECF8E]/12 px-2 py-0.5 text-[11px] font-medium text-[#64DFA8]">
-                Approved — node marked done.
-              </span>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 text-[13px] font-semibold text-[#E6E8EE]">
+              <CheckCircle2 className="h-4 w-4 text-[#3ECF8E]" />
+              <span>Approved</span>
             </div>
-            {node.human_feedback.trim() && (
-              <div className="rounded border border-[#272B36] bg-[#111318] px-3 py-2 text-[12px] text-[#8B92A5]">
-                <span className="font-medium text-[#E6E8EE]">Saved note: </span>
-                <span className="whitespace-pre-wrap">{node.human_feedback}</span>
-              </div>
-            )}
+            <span className="rounded border border-[#3ECF8E]/35 bg-[#3ECF8E]/12 px-2 py-0.5 text-[11px] font-medium text-[#64DFA8]">
+              Approved — node marked done.
+            </span>
           </div>
         ) : node.status === 'in_progress' &&
           node.human_feedback.trim() &&
@@ -968,7 +1108,7 @@ export function InspectorPanel({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-1.5 text-[13px] font-semibold text-[#F0BE63]">
                 <RotateCcw className="h-3.5 w-3.5 text-[#E5A93C]" />
-                <span>Revision requested — awaiting AI resubmission</span>
+                <span>Revision requested — awaiting AI revision plan &amp; resubmission</span>
               </div>
               <button
                 type="button"

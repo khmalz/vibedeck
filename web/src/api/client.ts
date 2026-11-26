@@ -109,11 +109,19 @@ export async function patchNode(
 
 export async function approveNode(
   projectId: string,
-  nodeId: string
+  nodeId: string,
+  comment?: string
 ): Promise<PlanNode> {
+  const trimmed = comment?.trim();
   const data = await requestJson<{ node: PlanNode }>(
     `/api/projects/${encodeURIComponent(projectId)}/nodes/${encodeURIComponent(nodeId)}/approve`,
-    { method: 'POST' }
+    trimmed
+      ? {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ comment: trimmed }),
+        }
+      : { method: 'POST' }
   );
   return data.node;
 }

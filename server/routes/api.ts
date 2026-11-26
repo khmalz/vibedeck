@@ -3,17 +3,22 @@ import { Hono, type Context } from 'hono';
 import type { z } from 'zod';
 import { db } from '../db/client';
 import {
+  approveNodeById,
   createGroup,
   createProject,
   deleteGroup,
   deleteNode,
   deleteProject,
+  getNodeById,
   getProjectById,
   getProjectTree,
   listProjects,
+  requestRevisionOnNode,
+  syncPatchedHumanFeedback,
   updateNode,
 } from '../db/queries';
 import {
+  ApproveNodeSchema,
   CreateGroupSchema,
   CreateProjectSchema,
   PatchNodeSchema,
@@ -138,7 +143,26 @@ export function createApiRoutes(
       return parsed.response;
     }
 
-    const node = updateNode(projectId, nodeId, parsed.data, database);
+    const existing = getNodeById(projectId, nodeId, database);
+    if (!existing) {
+      return c.json(
+        { error: `Node "${nodeId}" not found in project "${projectId}".` },
+        404
+      );
+    }
+
+    const patchPayload =
+      parsed.data.human_feedback !== undefined
+        ? {
+            ...parsed.data,
+            review_history: syncPatchedHumanFeedback(
+              existing.review_history,
+              parsed.data.human_feedback
+            ),
+          }
+        : parsed.data;
+
+    const node = updateNode(projectId, nodeId, patchPayload, database);
     if (!node) {
       return c.json(
         { error: `Node "${nodeId}" not found in project "${projectId}".` },
@@ -149,14 +173,33 @@ export function createApiRoutes(
     return c.json({ node });
   });
 
-  routes.post('/projects/:projectId/nodes/:nodeId/approve', (c) => {
+  routes.post('/projects/:projectId/nodes/:nodeId/approve', async (c) => {
     const projectId = c.req.param('projectId');
     const nodeId = c.req.param('nodeId');
     if (!getProjectById(projectId, database)) {
       return c.json({ error: `Project "${projectId}" not found.` }, 404);
     }
 
-    const node = updateNode(projectId, nodeId, { status: 'done' }, database);
+    let comment: string | undefined;
+    const rawBody = await c.req.text();
+    if (rawBody.trim().length > 0) {
+      let jsonBody: unknown;
+      try {
+        jsonBody = JSON.parse(rawBody);
+      } catch {
+        return c.json({ error: 'Invalid JSON request body.' }, 400);
+      }
+      const parsed = ApproveNodeSchema.safeParse(jsonBody);
+      if (!parsed.success) {
+        return c.json(
+          { error: 'Validation failed.', details: parsed.error.issues },
+          400
+        );
+      }
+      comment = parsed.data.comment;
+    }
+
+    const node = approveNodeById(projectId, nodeId, comment, database);
     if (!node) {
       return c.json(
         { error: `Node "${nodeId}" not found in project "${projectId}".` },
@@ -179,13 +222,10 @@ export function createApiRoutes(
       return parsed.response;
     }
 
-    const node = updateNode(
+    const node = requestRevisionOnNode(
       projectId,
       nodeId,
-      {
-        human_feedback: parsed.data.human_feedback,
-        status: 'in_progress',
-      },
+      parsed.data.human_feedback,
       database
     );
     if (!node) {

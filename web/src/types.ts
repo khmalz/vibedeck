@@ -7,6 +7,19 @@ export interface ChecklistItem {
   checked: boolean;
 }
 
+export type ReviewHistoryType =
+  | 'human_feedback'
+  | 'ai_plan'
+  | 'ai_report'
+  | 'approved';
+
+export interface ReviewHistoryEntry {
+  id: string;
+  type: ReviewHistoryType;
+  content: string;
+  created_at: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -37,6 +50,7 @@ export interface PlanNode {
   checklist: ChecklistItem[];
   ai_report: string;
   human_feedback: string;
+  review_history: ReviewHistoryEntry[];
   sort_order: number;
   created_at: string;
   updated_at: string;

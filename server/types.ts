@@ -17,6 +17,22 @@ export const ChecklistItemSchema = z.object({
 });
 export type ChecklistItem = z.infer<typeof ChecklistItemSchema>;
 
+export const ReviewHistoryTypeSchema = z.enum([
+  'human_feedback',
+  'ai_plan',
+  'ai_report',
+  'approved',
+]);
+export type ReviewHistoryType = z.infer<typeof ReviewHistoryTypeSchema>;
+
+export const ReviewHistoryEntrySchema = z.object({
+  id: z.string(),
+  type: ReviewHistoryTypeSchema,
+  content: z.string(),
+  created_at: z.string(),
+});
+export type ReviewHistoryEntry = z.infer<typeof ReviewHistoryEntrySchema>;
+
 export interface Project {
   id: string;
   name: string;
@@ -47,6 +63,7 @@ export interface NodeRow {
   checklist: string;
   ai_report: string;
   human_feedback: string;
+  review_history: string;
   sort_order: number;
   created_at: string;
   updated_at: string;
@@ -66,6 +83,7 @@ export interface PlanNode {
   checklist: ChecklistItem[];
   ai_report: string;
   human_feedback: string;
+  review_history: ReviewHistoryEntry[];
   sort_order: number;
   created_at: string;
   updated_at: string;
@@ -139,3 +157,8 @@ export const RequestRevisionSchema = z.object({
   human_feedback: z.string().trim().min(1),
 });
 export type RequestRevisionInput = z.infer<typeof RequestRevisionSchema>;
+
+export const ApproveNodeSchema = z.object({
+  comment: z.string().optional(),
+});
+export type ApproveNodeInput = z.infer<typeof ApproveNodeSchema>;

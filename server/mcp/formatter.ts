@@ -160,12 +160,24 @@ export function formatNodeContext(data: NodeWithAncestors): string {
     lines.push('_No checklist items._');
   }
 
-  if (node.ai_report.trim()) {
+  if (node.review_history.length > 0) {
+    const labelMap: Record<string, string> = {
+      human_feedback: 'Human Feedback',
+      ai_plan: 'AI Revision Plan',
+      ai_report: 'AI Report',
+      approved: 'Approved',
+    };
+    lines.push('', '### Review & Revision Timeline');
+    node.review_history.forEach((entry, index) => {
+      const label = labelMap[entry.type] ?? entry.type;
+      lines.push(`${index + 1}. **${label}** (${entry.created_at}): ${entry.content}`);
+    });
+  } else if (node.ai_report.trim()) {
     lines.push('', '### AI Report', node.ai_report.trim());
   }
 
   if (node.human_feedback.trim()) {
-    lines.push('', '### Human Feedback', node.human_feedback.trim());
+    lines.push('', '### Active Human Feedback', node.human_feedback.trim());
   }
 
   return lines.join('\n');

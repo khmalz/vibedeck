@@ -300,6 +300,52 @@ describe('VibeDeck MCP Client E2E Integration', () => {
       'Handle retry backoff cleanly.'
     );
 
+    // Round 2: AI starts revision with revision_plan -> submits -> human_feedback cleared, timeline preserved, original plan intact
+    const startRound2 = await clientA.callTool({
+      name: 'start_node',
+      arguments: {
+        node_id: taskId,
+        revision_plan: 'Add exponential backoff and cap retries at 3 attempts.',
+      },
+    });
+    expect(startRound2.isError).not.toBe(true);
+    expect(extractText(startRound2)).toContain('AI Revision Plan');
+
+    const reviewRound2 = await clientA.callTool({
+      name: 'submit_for_review',
+      arguments: {
+        node_id: taskId,
+        ai_report: 'Added exponential backoff with max 3 retries.',
+      },
+    });
+    expect(reviewRound2.isError).not.toBe(true);
+
+    const round2Node = getNodeById(projectA.id, taskId, testDb)!;
+    expect(round2Node.status).toBe('needs_review');
+    expect(round2Node.description).toBe('Add token bucket limiter');
+    expect(round2Node.human_feedback).toBe('');
+    expect(round2Node.review_history.map((e) => e.type)).toEqual([
+      'ai_report',
+      'human_feedback',
+      'ai_plan',
+      'ai_report',
+    ]);
+
+    const approveRes = await fetch(
+      `${baseUrl}/api/projects/${projectA.id}/nodes/${taskId}/approve`,
+      { method: 'POST' }
+    );
+    expect(approveRes.status).toBe(200);
+    const approvedNode = getNodeById(projectA.id, taskId, testDb)!;
+    expect(approvedNode.status).toBe('done');
+    expect(approvedNode.review_history.map((e) => e.type)).toEqual([
+      'ai_report',
+      'human_feedback',
+      'ai_plan',
+      'ai_report',
+      'approved',
+    ]);
+
     // 3. Cross-project isolation (Project A client cannot read/mutate Project B's node)
     const clientB = await connectMcpClient(projectB.id);
     const upsertB = await clientB.callTool({

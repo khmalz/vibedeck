@@ -10,6 +10,8 @@ import type {
   PlanNode,
   Project,
   ProjectTree,
+  ReviewHistoryEntry,
+  ReviewHistoryType,
   UpsertPlanNodeInput,
 } from '../types';
 
@@ -34,6 +36,7 @@ export function parseNodeRow(row: NodeRow): PlanNode {
     rules: row.rules ?? '',
     ai_report: row.ai_report ?? '',
     human_feedback: row.human_feedback ?? '',
+    review_history: parseJsonArray<ReviewHistoryEntry>(row.review_history ?? '[]', []),
     scope_files: parseJsonArray<string>(row.scope_files, []),
     checklist: parseJsonArray<ChecklistItem>(row.checklist, []),
   };
@@ -282,7 +285,7 @@ export function getNodeWithAncestors(
        SELECT
          id, project_id, group_id, parent_id, node_type, title, description,
          status, scope_files, rules, checklist, ai_report, human_feedback,
-         sort_order, created_at, updated_at, depth
+         review_history, sort_order, created_at, updated_at, depth
        FROM lineage
        ORDER BY depth DESC`
     )
@@ -312,6 +315,7 @@ export interface CreateNodeInput {
   checklist?: ChecklistItem[];
   ai_report?: string;
   human_feedback?: string;
+  review_history?: ReviewHistoryEntry[];
   sort_order?: number;
 }
 
@@ -361,6 +365,7 @@ export function createNode(
         $checklist: string;
         $aiReport: string;
         $humanFeedback: string;
+        $reviewHistory: string;
         $sortOrder: number;
         $createdAt: string;
         $updatedAt: string;
@@ -369,11 +374,11 @@ export function createNode(
       `INSERT INTO nodes (
          id, project_id, group_id, parent_id, node_type, title, description,
          status, scope_files, rules, checklist, ai_report, human_feedback,
-         sort_order, created_at, updated_at
+         review_history, sort_order, created_at, updated_at
        ) VALUES (
          $id, $projectId, $groupId, $parentId, $nodeType, $title, $description,
          $status, $scopeFiles, $rules, $checklist, $aiReport, $humanFeedback,
-         $sortOrder, $createdAt, $updatedAt
+         $reviewHistory, $sortOrder, $createdAt, $updatedAt
        )`
     )
     .run({
@@ -390,6 +395,7 @@ export function createNode(
       $checklist: JSON.stringify(input.checklist ?? []),
       $aiReport: input.ai_report ?? '',
       $humanFeedback: input.human_feedback ?? '',
+      $reviewHistory: JSON.stringify(input.review_history ?? []),
       $sortOrder: sortOrder,
       $createdAt: now,
       $updatedAt: now,
@@ -411,6 +417,7 @@ export interface UpdateNodeInput {
   checklist?: ChecklistItem[];
   ai_report?: string;
   human_feedback?: string;
+  review_history?: ReviewHistoryEntry[];
   sort_order?: number;
 }
 
@@ -443,6 +450,7 @@ export function updateNode(
         $checklist: string;
         $aiReport: string;
         $humanFeedback: string;
+        $reviewHistory: string;
         $sortOrder: number;
         $updatedAt: string;
       }
@@ -459,6 +467,7 @@ export function updateNode(
          checklist = $checklist,
          ai_report = $aiReport,
          human_feedback = $humanFeedback,
+         review_history = $reviewHistory,
          sort_order = $sortOrder,
          updated_at = $updatedAt
        WHERE id = $id AND project_id = $projectId`
@@ -477,12 +486,183 @@ export function updateNode(
       $checklist: JSON.stringify(patch.checklist ?? existing.checklist),
       $aiReport: patch.ai_report ?? existing.ai_report,
       $humanFeedback: patch.human_feedback ?? existing.human_feedback,
+      $reviewHistory: JSON.stringify(patch.review_history ?? existing.review_history),
       $sortOrder: patch.sort_order ?? existing.sort_order,
       $updatedAt: now,
     });
 
   touchProject(projectId, database);
   return getNodeById(projectId, nodeId, database);
+}
+
+function appendHistoryEntry(
+  history: ReviewHistoryEntry[],
+  type: ReviewHistoryType,
+  content: string,
+  createdAt = nowIso()
+): ReviewHistoryEntry[] {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return history;
+  }
+  const last = history[history.length - 1];
+  if (last && last.type === type && last.content === trimmed) {
+    return history;
+  }
+  return [
+    ...history,
+    {
+      id: crypto.randomUUID(),
+      type,
+      content: trimmed,
+      created_at: createdAt,
+    },
+  ];
+}
+
+export function syncPatchedHumanFeedback(
+  existingHistory: ReviewHistoryEntry[],
+  nextFeedback: string,
+  timestamp = nowIso()
+): ReviewHistoryEntry[] {
+  const trimmed = nextFeedback.trim();
+  if (!trimmed) {
+    return existingHistory;
+  }
+  const last = existingHistory[existingHistory.length - 1];
+  if (last && last.type === 'human_feedback') {
+    return [
+      ...existingHistory.slice(0, -1),
+      { ...last, content: trimmed, created_at: timestamp },
+    ];
+  }
+  return appendHistoryEntry(existingHistory, 'human_feedback', trimmed, timestamp);
+}
+
+export function requestRevisionOnNode(
+  projectId: string,
+  nodeId: string,
+  humanFeedback: string,
+  database: Database = db
+): PlanNode | null {
+  const existing = getNodeById(projectId, nodeId, database);
+  if (!existing) {
+    return null;
+  }
+  const trimmed = humanFeedback.trim();
+  const nextHistory = appendHistoryEntry(
+    existing.review_history,
+    'human_feedback',
+    trimmed
+  );
+  return updateNode(
+    projectId,
+    nodeId,
+    {
+      human_feedback: trimmed,
+      status: 'in_progress',
+      review_history: nextHistory,
+    },
+    database
+  );
+}
+
+export function approveNodeById(
+  projectId: string,
+  nodeId: string,
+  comment?: string,
+  database: Database = db
+): PlanNode | null {
+  const existing = getNodeById(projectId, nodeId, database);
+  if (!existing) {
+    return null;
+  }
+  const nextHistory = appendHistoryEntry(
+    existing.review_history,
+    'approved',
+    comment?.trim() || 'Approved (Done)'
+  );
+  return updateNode(
+    projectId,
+    nodeId,
+    {
+      status: 'done',
+      human_feedback: '',
+      review_history: nextHistory,
+    },
+    database
+  );
+}
+
+export function startNodeExecution(
+  projectId: string,
+  nodeId: string,
+  revisionPlan?: string,
+  database: Database = db
+): PlanNode | null {
+  const existing = getNodeById(projectId, nodeId, database);
+  if (!existing) {
+    return null;
+  }
+  const nextHistory = revisionPlan?.trim()
+    ? appendHistoryEntry(existing.review_history, 'ai_plan', revisionPlan)
+    : existing.review_history;
+  return updateNode(
+    projectId,
+    nodeId,
+    {
+      status: 'in_progress',
+      review_history: nextHistory,
+    },
+    database
+  );
+}
+
+export function submitNodeForReview(
+  projectId: string,
+  nodeId: string,
+  input: {
+    ai_report: string;
+    revision_plan?: string;
+    checked_items?: string[];
+  },
+  database: Database = db
+): PlanNode | null {
+  const existing = getNodeById(projectId, nodeId, database);
+  if (!existing) {
+    return null;
+  }
+
+  const targets = new Set(
+    (input.checked_items ?? []).map((entry) => entry.trim().toLowerCase())
+  );
+  const nextChecklist = existing.checklist.map((item, idx) => {
+    if (item.checked) {
+      return item;
+    }
+    const matched =
+      targets.has(String(idx)) || targets.has(item.text.trim().toLowerCase());
+    return matched ? { ...item, checked: true } : item;
+  });
+
+  const now = nowIso();
+  let nextHistory = input.revision_plan?.trim()
+    ? appendHistoryEntry(existing.review_history, 'ai_plan', input.revision_plan, now)
+    : existing.review_history;
+  nextHistory = appendHistoryEntry(nextHistory, 'ai_report', input.ai_report, now);
+
+  return updateNode(
+    projectId,
+    nodeId,
+    {
+      status: 'needs_review',
+      ai_report: input.ai_report,
+      human_feedback: '',
+      checklist: nextChecklist,
+      review_history: nextHistory,
+    },
+    database
+  );
 }
 
 export function deleteNode(
@@ -560,6 +740,15 @@ export function upsertPlan(
 
         let saved: PlanNode;
         if (existing) {
+          const addressedPlanFeedback =
+            existing.status === 'planned' &&
+            existing.human_feedback.trim().length > 0 &&
+            item.description !== undefined &&
+            item.description !== existing.description;
+          const nextHistory = addressedPlanFeedback
+            ? appendHistoryEntry(existing.review_history, 'ai_plan', item.description!)
+            : existing.review_history;
+
           saved = updateNode(
             projectId,
             existing.id,
@@ -575,6 +764,8 @@ export function upsertPlan(
                 item.checklist !== undefined
                   ? mergeChecklist(item.checklist, existing.checklist)
                   : existing.checklist,
+              human_feedback: addressedPlanFeedback ? '' : existing.human_feedback,
+              review_history: nextHistory,
               sort_order: index,
             },
             database

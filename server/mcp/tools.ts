@@ -7,7 +7,8 @@ import {
   getNodeById,
   getNodeWithAncestors,
   getProjectTree,
-  updateNode,
+  startNodeExecution,
+  submitNodeForReview,
   upsertPlan,
 } from '../db/queries';
 import { NodeStatusSchema, UpsertPlanInputSchema } from '../types';
@@ -121,6 +122,12 @@ export function registerProjectTools(
         'Mark a node as in_progress and return its full context including inherited scope_files, rules, and human_feedback.',
       inputSchema: {
         node_id: z.string().min(1).describe('Node ID to start working on.'),
+        revision_plan: z
+          .string()
+          .optional()
+          .describe(
+            'When revising work after human_feedback, describe your planned fix steps here so they appear in the UI Review Timeline while preserving the original Plan & Process.'
+          ),
       },
       annotations: {
         readOnlyHint: false,
@@ -129,8 +136,8 @@ export function registerProjectTools(
         openWorldHint: false,
       },
     },
-    async ({ node_id }) => {
-      const updated = updateNode(projectId, node_id, { status: 'in_progress' }, database);
+    async ({ node_id, revision_plan }) => {
+      const updated = startNodeExecution(projectId, node_id, revision_plan, database);
       if (!updated) {
         return textResult(`Node "${node_id}" not found in project "${projectId}".`, true);
       }
@@ -152,6 +159,10 @@ export function registerProjectTools(
       inputSchema: {
         node_id: z.string().min(1).describe('Node ID to submit for human review.'),
         ai_report: z.string().min(1).describe('Concise Markdown summary of changes and verification.'),
+        revision_plan: z
+          .string()
+          .optional()
+          .describe('Optional revision plan summary if not already provided in start_node.'),
         checked_items: z
           .array(z.string())
           .optional()
@@ -164,32 +175,11 @@ export function registerProjectTools(
         openWorldHint: false,
       },
     },
-    async ({ node_id, ai_report, checked_items }) => {
-      const existing = getNodeById(projectId, node_id, database);
-      if (!existing) {
-        return textResult(`Node "${node_id}" not found in project "${projectId}".`, true);
-      }
-
-      const targets = new Set(
-        (checked_items ?? []).map((entry) => entry.trim().toLowerCase())
-      );
-      const nextChecklist = existing.checklist.map((item, idx) => {
-        if (item.checked) {
-          return item;
-        }
-        const matched =
-          targets.has(String(idx)) || targets.has(item.text.trim().toLowerCase());
-        return matched ? { ...item, checked: true } : item;
-      });
-
-      const updated = updateNode(
+    async ({ node_id, ai_report, revision_plan, checked_items }) => {
+      const updated = submitNodeForReview(
         projectId,
         node_id,
-        {
-          status: 'needs_review',
-          ai_report,
-          checklist: nextChecklist,
-        },
+        { ai_report, revision_plan, checked_items },
         database
       );
       if (!updated) {

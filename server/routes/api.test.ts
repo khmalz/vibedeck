@@ -1,9 +1,11 @@
 import { afterAll, describe, expect, test } from 'bun:test';
-import type { Database } from 'bun:sqlite';
+import { Database } from 'bun:sqlite';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createDb } from '../db/client';
+import { getNodeById } from '../db/queries';
+import { initSchema } from '../db/schema';
 import { createApp } from '../index';
 import type { Group, PlanNode, Project, ProjectTree } from '../types';
 import { createSseBroadcaster } from './sse';
@@ -82,10 +84,19 @@ async function apiJson<T>(urlPath: string, init?: RequestInit) {
   return { status: res.status, body };
 }
 
-afterAll(() => {
-  server.stop(true);
+afterAll(async () => {
+  await server.stop(true);
   testDb.close(false);
-  fs.rmSync(tempDir, { recursive: true, force: true });
+  try {
+    fs.rmSync(tempDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 100,
+    });
+  } catch {
+    // Windows may hold WAL shm handle briefly until process exit
+  }
 });
 
 describe('REST API & SSE Live Broadcaster', () => {
@@ -352,5 +363,89 @@ describe('REST API & SSE Live Broadcaster', () => {
 
     await apiJson(`/api/projects/${projA.id}`, { method: 'DELETE' });
     await apiJson(`/api/projects/${projB.id}`, { method: 'DELETE' });
+  });
+
+  test('migrates legacy v0.0.1 SQLite schema without review_history safely and backfills entries', () => {
+    const legacyDbPath = path.join(tempDir, 'legacy-v001.db');
+    const legacyDb = new Database(legacyDbPath, { create: true, strict: true });
+
+    try {
+      legacyDb.exec(`
+        CREATE TABLE projects (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          summary TEXT DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE groups (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE nodes (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          group_id TEXT REFERENCES groups(id) ON DELETE SET NULL,
+          parent_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+          node_type TEXT NOT NULL CHECK (node_type IN ('module', 'task', 'revision')),
+          title TEXT NOT NULL,
+          description TEXT DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'in_progress', 'needs_review', 'done')),
+          scope_files TEXT NOT NULL DEFAULT '[]',
+          rules TEXT DEFAULT '',
+          checklist TEXT NOT NULL DEFAULT '[]',
+          ai_report TEXT DEFAULT '',
+          human_feedback TEXT DEFAULT '',
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+
+      legacyDb.run(
+        `INSERT INTO projects (id, name, summary, created_at, updated_at) VALUES ('p1', 'Legacy Project', '', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')`
+      );
+      legacyDb.run(
+        `INSERT INTO nodes (id, project_id, node_type, title, description, status, checklist, ai_report, human_feedback, sort_order, created_at, updated_at)
+         VALUES
+           ('n-review', 'p1', 'task', 'Needs Rev Node', 'Original plan', 'needs_review', '[{"text":"Item 1","checked":true}]', 'Updated implementation', 'Old feedback round 1', 0, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'),
+           ('n-prog', 'p1', 'task', 'In Progress Node', 'Active plan', 'in_progress', '[]', 'First attempt', 'Pending fix', 1, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'),
+           ('n-done', 'p1', 'task', 'Done Node', 'Finished plan', 'done', '[]', 'Final report', 'Prior comment', 2, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')`
+      );
+
+      // Run idempotent schema init twice
+      initSchema(legacyDb);
+      initSchema(legacyDb);
+
+      const reviewNode = getNodeById('p1', 'n-review', legacyDb)!;
+      expect(reviewNode.description).toBe('Original plan');
+      expect(reviewNode.checklist).toEqual([{ text: 'Item 1', checked: true }]);
+      expect(reviewNode.human_feedback).toBe('');
+      expect(reviewNode.review_history.map((e) => e.type)).toEqual([
+        'human_feedback',
+        'ai_report',
+      ]);
+      expect(reviewNode.review_history[0]?.content).toBe('Old feedback round 1');
+
+      const progNode = getNodeById('p1', 'n-prog', legacyDb)!;
+      expect(progNode.human_feedback).toBe('Pending fix');
+      expect(progNode.review_history.map((e) => e.type)).toEqual([
+        'ai_report',
+        'human_feedback',
+      ]);
+
+      const doneNode = getNodeById('p1', 'n-done', legacyDb)!;
+      expect(doneNode.human_feedback).toBe('');
+      expect(doneNode.review_history.map((e) => e.type)).toEqual([
+        'human_feedback',
+        'ai_report',
+        'approved',
+      ]);
+    } finally {
+      legacyDb.close(false);
+    }
   });
 });
