@@ -161,8 +161,77 @@ function migrateNodesReviewHistory(db: Database): void {
   runMigration();
 }
 
+/** Derive a container module's status from its direct children's statuses. */
+export function deriveModuleStatus(childStatuses: NodeStatus[]): NodeStatus {
+  if (childStatuses.length === 0) {
+    return 'planned';
+  }
+  if (childStatuses.every((s) => s === 'done')) {
+    return 'done';
+  }
+  if (childStatuses.every((s) => s === 'planned')) {
+    return 'planned';
+  }
+  if (childStatuses.some((s) => s === 'in_progress')) {
+    return 'in_progress';
+  }
+  if (childStatuses.some((s) => s === 'needs_review')) {
+    return 'needs_review';
+  }
+  return 'in_progress';
+}
+
+/** Reconcile stale module statuses from child statuses across existing databases. */
+function syncModuleStatuses(db: Database): void {
+  const selectModules = db.prepare<{ id: string; status: NodeStatus }, []>(
+    "SELECT id, status FROM nodes WHERE node_type = 'module'"
+  );
+  const selectChildren = db.prepare<{ status: NodeStatus }, { $parentId: string }>(
+    'SELECT status FROM nodes WHERE parent_id = $parentId'
+  );
+  const updateModule = db.prepare<
+    unknown,
+    { $id: string; $status: NodeStatus; $updatedAt: string }
+  >('UPDATE nodes SET status = $status, updated_at = $updatedAt WHERE id = $id');
+
+  const runSync = db.transaction(() => {
+    const now = new Date().toISOString();
+    for (let pass = 0; pass < 20; pass++) {
+      let changed = false;
+      const modules = selectModules.all();
+      for (const mod of modules) {
+        const children = selectChildren.all({ $parentId: mod.id });
+        if (children.length === 0) {
+          continue;
+        }
+        const derived = deriveModuleStatus(children.map((c) => c.status));
+        if (derived !== mod.status) {
+          updateModule.run({
+            $id: mod.id,
+            $status: derived,
+            $updatedAt: now,
+          });
+          changed = true;
+        }
+      }
+      if (!changed) {
+        break;
+      }
+    }
+  });
+
+  try {
+    runSync();
+  } finally {
+    selectModules.finalize();
+    selectChildren.finalize();
+    updateModule.finalize();
+  }
+}
+
 /** Initialize idempotent SQLite tables, indexes, and backward-compatible migrations. */
 export function initSchema(db: Database): void {
   db.exec(SCHEMA_SQL);
   migrateNodesReviewHistory(db);
+  syncModuleStatuses(db);
 }

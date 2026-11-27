@@ -28,9 +28,15 @@ function renderSubtree(
     visited.add(node.id);
 
     const indent = '  '.repeat(depth);
-    lines.push(`${indent}- [${node.status}] (${node.node_type}) ${node.title} — id:${node.id}`);
-
     const children = childrenByParent.get(node.id) ?? [];
+    const progressSuffix =
+      node.node_type === 'module' && children.length > 0
+        ? ` (${children.filter((c) => c.status === 'done').length}/${children.length} done)`
+        : '';
+    lines.push(
+      `${indent}- [${node.status}] (${node.node_type}) ${node.title}${progressSuffix} — id:${node.id}`
+    );
+
     for (const child of children) {
       walk(child, depth + 1);
     }

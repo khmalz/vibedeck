@@ -312,8 +312,8 @@ export function AddProjectModal({
               </button>
               <button
                 type="submit"
-                disabled={submitting}
-                className="h-8 rounded bg-[#6384FF] px-3.5 text-[13px] font-medium text-[#111318] transition-colors hover:bg-[#7A96FF] disabled:opacity-50"
+                disabled={submitting || !name.trim()}
+                className="h-8 rounded bg-[#6384FF] px-3.5 text-[13px] font-medium text-[#111318] transition-colors hover:bg-[#7A96FF] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {submitting ? 'Creating…' : 'Create project'}
               </button>

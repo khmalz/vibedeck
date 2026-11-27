@@ -412,11 +412,16 @@ export function InspectorPanel({
   };
 
   const handleSaveNote = async () => {
+    const trimmed = feedback.trim();
+    if (!trimmed) {
+      setError('Enter feedback before saving.');
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       const updated = await patchNode(projectId, node.id, {
-        human_feedback: feedback.trim(),
+        human_feedback: trimmed,
       });
       onNodeUpdated(updated);
       setEditingFeedback(false);
@@ -508,9 +513,9 @@ export function InspectorPanel({
                 </button>
                 <button
                   type="button"
-                  disabled={busy}
+                  disabled={busy || !draftTitle.trim()}
                   onClick={handleSaveDetails}
-                  className="inline-flex h-7 items-center gap-1 rounded bg-[#6384FF] px-2.5 text-[12px] font-medium text-[#111318] transition-colors hover:bg-[#7A96FF] disabled:opacity-50"
+                  className="inline-flex h-7 items-center gap-1 rounded bg-[#6384FF] px-2.5 text-[12px] font-medium text-[#111318] transition-colors hover:bg-[#7A96FF] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Save className="h-3 w-3" />
                   <span>Save changes</span>
@@ -712,9 +717,9 @@ export function InspectorPanel({
               </button>
               <button
                 type="button"
-                disabled={busy}
+                disabled={busy || !draftTitle.trim()}
                 onClick={handleSaveDetails}
-                className="inline-flex h-8 items-center gap-1.5 rounded bg-[#6384FF] px-3 text-[12px] font-medium text-[#111318] hover:bg-[#7A96FF] disabled:opacity-50"
+                className="inline-flex h-8 items-center gap-1.5 rounded bg-[#6384FF] px-3 text-[12px] font-medium text-[#111318] hover:bg-[#7A96FF] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Save className="h-3.5 w-3.5" />
                 <span>Save changes</span>
@@ -889,9 +894,9 @@ export function InspectorPanel({
               </button>
               <button
                 type="button"
-                disabled={busy}
+                disabled={busy || !draftTitle.trim()}
                 onClick={handleSaveDetails}
-                className="inline-flex h-8 items-center gap-1.5 rounded bg-[#6384FF] px-3 text-[12px] font-medium text-[#111318] hover:bg-[#7A96FF] disabled:opacity-50"
+                className="inline-flex h-8 items-center gap-1.5 rounded bg-[#6384FF] px-3 text-[12px] font-medium text-[#111318] hover:bg-[#7A96FF] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Save className="h-3.5 w-3.5" />
                 <span>Save changes</span>
@@ -1155,9 +1160,9 @@ export function InspectorPanel({
                 <>
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || !feedback.trim()}
                     onClick={handleRequestRevision}
-                    className="inline-flex h-8 items-center gap-1.5 rounded border border-[#E5A93C]/45 bg-[#E5A93C]/12 px-3 text-[12px] font-medium text-[#F0BE63] transition-colors hover:bg-[#E5A93C]/20 disabled:opacity-50"
+                    className="inline-flex h-8 items-center gap-1.5 rounded border border-[#E5A93C]/45 bg-[#E5A93C]/12 px-3 text-[12px] font-medium text-[#F0BE63] transition-colors hover:bg-[#E5A93C]/20 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <RotateCcw className="h-3.5 w-3.5" />
                     <span>Request Revision</span>
@@ -1189,9 +1194,9 @@ export function InspectorPanel({
                   )}
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || !feedback.trim()}
                     onClick={handleSaveNote}
-                    className="inline-flex h-8 items-center gap-1.5 rounded border border-[#272B36] bg-[#111318] px-3 text-[12px] font-medium text-[#E6E8EE] transition-colors hover:bg-[#1F242E] disabled:opacity-50"
+                    className="inline-flex h-8 items-center gap-1.5 rounded border border-[#272B36] bg-[#111318] px-3 text-[12px] font-medium text-[#E6E8EE] transition-colors hover:bg-[#1F242E] disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <Save className="h-3.5 w-3.5 text-[#6384FF]" />
                     <span>Save feedback</span>

@@ -1,5 +1,6 @@
 import type { Database } from 'bun:sqlite';
 import { db } from './client';
+import { deriveModuleStatus } from './schema';
 import type {
   ChecklistItem,
   Group,
@@ -402,6 +403,9 @@ export function createNode(
       $updatedAt: now,
     });
 
+  if (input.parent_id) {
+    rollupAncestorModuleStatuses(projectId, input.parent_id, database);
+  }
   touchProject(projectId, database);
   return getNodeById(projectId, id, database)!;
 }
@@ -492,8 +496,67 @@ export function updateNode(
       $updatedAt: now,
     });
 
+  const nextParentId =
+    patch.parent_id !== undefined ? patch.parent_id : existing.parent_id;
+
+  if (patch.status !== undefined || patch.parent_id !== undefined) {
+    rollupAncestorModuleStatuses(projectId, nextParentId, database);
+    if (existing.parent_id && existing.parent_id !== nextParentId) {
+      rollupAncestorModuleStatuses(projectId, existing.parent_id, database);
+    }
+  }
+
   touchProject(projectId, database);
   return getNodeById(projectId, nodeId, database);
+}
+
+/** Recompute status for every ancestor module bottom-up from startParentId. */
+export function rollupAncestorModuleStatuses(
+  projectId: string,
+  startParentId: string | null,
+  database: Database = db
+): void {
+  let currentParentId = startParentId;
+  const visited = new Set<string>();
+
+  while (currentParentId && !visited.has(currentParentId) && visited.size < 100) {
+    visited.add(currentParentId);
+    const parent = getNodeById(projectId, currentParentId, database);
+    if (!parent) {
+      break;
+    }
+
+    if (parent.node_type === 'module') {
+      const childRows = database
+        .query<{ status: NodeStatus }, { $projectId: string; $parentId: string }>(
+          'SELECT status FROM nodes WHERE project_id = $projectId AND parent_id = $parentId'
+        )
+        .all({ $projectId: projectId, $parentId: parent.id });
+
+      if (childRows.length > 0) {
+        const derived = deriveModuleStatus(childRows.map((r) => r.status));
+        if (derived !== parent.status) {
+          database
+            .query<
+              unknown,
+              { $id: string; $projectId: string; $status: NodeStatus; $updatedAt: string }
+            >(
+              `UPDATE nodes
+               SET status = $status, updated_at = $updatedAt
+               WHERE id = $id AND project_id = $projectId`
+            )
+            .run({
+              $id: parent.id,
+              $projectId: projectId,
+              $status: derived,
+              $updatedAt: nowIso(),
+            });
+        }
+      }
+    }
+
+    currentParentId = parent.parent_id;
+  }
 }
 
 function appendHistoryEntry(
@@ -671,6 +734,7 @@ export function deleteNode(
   nodeId: string,
   database: Database = db
 ): boolean {
+  const existing = getNodeById(projectId, nodeId, database);
   const result = database
     .query<unknown, { $id: string; $projectId: string }>(
       'DELETE FROM nodes WHERE id = $id AND project_id = $projectId'
@@ -678,6 +742,9 @@ export function deleteNode(
     .run({ $id: nodeId, $projectId: projectId });
 
   if (result.changes > 0) {
+    if (existing?.parent_id) {
+      rollupAncestorModuleStatuses(projectId, existing.parent_id, database);
+    }
     touchProject(projectId, database);
     return true;
   }

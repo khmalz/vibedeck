@@ -5,7 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { createDb } from '../db/client';
 import {
+  approveNodeById,
   createProject,
+  deleteNode,
   getNodeById,
   listProjects,
   updateNode,
@@ -294,5 +296,97 @@ describe('MCP Streamable HTTP (/mcp/:projectId)', () => {
     });
     expect(bUpsert.isError).toBe(false);
     expect(getNodeById(projectA.id, taskId, testDb)?.title).toBe('Implement Session Guard v2');
+  });
+
+  test('rolls up ancestor module statuses automatically and displays child progress in get_project_tree', async () => {
+    const proj = createProject({ name: 'Rollup Deck' }, testDb);
+
+    const up = await callTool(proj.id, 'upsert_plan', {
+      group_name: 'Phase 1',
+      nodes: [
+        {
+          node_type: 'module',
+          title: 'Root Module',
+          children: [
+            {
+              node_type: 'module',
+              title: 'Sub Module',
+              children: [
+                { node_type: 'task', title: 'Task 1' },
+                { node_type: 'task', title: 'Task 2' },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    expect(up.isError).toBe(false);
+
+    const rootId = up.text.match(/\(module\) Root Module — id:([^\s]+)/)![1]!;
+    const subId = up.text.match(/\(module\) Sub Module — id:([^\s]+)/)![1]!;
+    const task1Id = up.text.match(/\(task\) Task 1 — id:([^\s]+)/)![1]!;
+    const task2Id = up.text.match(/\(task\) Task 2 — id:([^\s]+)/)![1]!;
+
+    expect(getNodeById(proj.id, subId, testDb)?.status).toBe('planned');
+    expect(getNodeById(proj.id, rootId, testDb)?.status).toBe('planned');
+
+    // Start Task 1 -> Sub Module & Root Module roll up to in_progress
+    await callTool(proj.id, 'start_node', { node_id: task1Id });
+    expect(getNodeById(proj.id, subId, testDb)?.status).toBe('in_progress');
+    expect(getNodeById(proj.id, rootId, testDb)?.status).toBe('in_progress');
+
+    // Submit Task 1 -> Sub Module & Root Module roll up to needs_review
+    await callTool(proj.id, 'submit_for_review', {
+      node_id: task1Id,
+      ai_report: 'Task 1 complete.',
+    });
+    expect(getNodeById(proj.id, subId, testDb)?.status).toBe('needs_review');
+    expect(getNodeById(proj.id, rootId, testDb)?.status).toBe('needs_review');
+
+    // Approve Task 1 while Task 2 is still planned -> mix of done + planned rolls up to in_progress
+    approveNodeById(proj.id, task1Id, undefined, testDb);
+    expect(getNodeById(proj.id, subId, testDb)?.status).toBe('in_progress');
+    expect(getNodeById(proj.id, rootId, testDb)?.status).toBe('in_progress');
+
+    // Approve Task 2 -> all children done -> Sub Module & Root Module become done
+    approveNodeById(proj.id, task2Id, undefined, testDb);
+    expect(getNodeById(proj.id, subId, testDb)?.status).toBe('done');
+    expect(getNodeById(proj.id, rootId, testDb)?.status).toBe('done');
+
+    const treeDone = await callTool(proj.id, 'get_project_tree', {});
+    expect(treeDone.text).toContain('[done] (module) Root Module (1/1 done)');
+    expect(treeDone.text).toContain('[done] (module) Sub Module (2/2 done)');
+
+    // Adding a new planned task under Sub Module via upsert_plan rolls Sub & Root back to in_progress
+    const upAdd = await callTool(proj.id, 'upsert_plan', {
+      group_name: 'Phase 1',
+      nodes: [
+        {
+          id: rootId,
+          node_type: 'module',
+          title: 'Root Module',
+          children: [
+            {
+              id: subId,
+              node_type: 'module',
+              title: 'Sub Module',
+              children: [
+                { id: task1Id, node_type: 'task', title: 'Task 1' },
+                { id: task2Id, node_type: 'task', title: 'Task 2' },
+                { node_type: 'task', title: 'Task 3' },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const task3Id = upAdd.text.match(/\(task\) Task 3 — id:([^\s]+)/)![1]!;
+    expect(getNodeById(proj.id, subId, testDb)?.status).toBe('in_progress');
+    expect(getNodeById(proj.id, rootId, testDb)?.status).toBe('in_progress');
+
+    // Deleting unfinished Task 3 restores Sub & Root back to done
+    expect(deleteNode(proj.id, task3Id, testDb)).toBe(true);
+    expect(getNodeById(proj.id, subId, testDb)?.status).toBe('done');
+    expect(getNodeById(proj.id, rootId, testDb)?.status).toBe('done');
   });
 });
