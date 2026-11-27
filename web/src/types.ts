@@ -11,7 +11,8 @@ export type ReviewHistoryType =
   | 'human_feedback'
   | 'ai_plan'
   | 'ai_report'
-  | 'approved';
+  | 'approved'
+  | 'reopened';
 
 export interface ReviewHistoryEntry {
   id: string;
@@ -45,6 +46,7 @@ export interface PlanNode {
   title: string;
   description: string;
   status: NodeStatus;
+  previous_status: NodeStatus | null;
   scope_files: string[];
   rules: string;
   checklist: ChecklistItem[];
@@ -96,6 +98,7 @@ export interface ProjectExportBundle {
     title: string;
     description?: string;
     status?: NodeStatus;
+    previous_status?: NodeStatus | null;
     scope_files?: string[];
     rules?: string;
     checklist?: ChecklistItem[];

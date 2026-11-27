@@ -146,6 +146,33 @@ export async function approveNode(
   return data.node;
 }
 
+export async function reopenNode(
+  projectId: string,
+  nodeId: string,
+  options?: { reason?: string; cascade_scope?: 'cascaded' | 'all' }
+): Promise<PlanNode> {
+  const payload: { reason?: string; cascade_scope?: 'cascaded' | 'all' } = {};
+  const trimmedReason = options?.reason?.trim();
+  if (trimmedReason) {
+    payload.reason = trimmedReason;
+  }
+  if (options?.cascade_scope) {
+    payload.cascade_scope = options.cascade_scope;
+  }
+
+  const data = await requestJson<{ node: PlanNode }>(
+    `/api/projects/${encodeURIComponent(projectId)}/nodes/${encodeURIComponent(nodeId)}/reopen`,
+    Object.keys(payload).length > 0
+      ? {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }
+      : { method: 'POST' }
+  );
+  return data.node;
+}
+
 export async function requestNodeRevision(
   projectId: string,
   nodeId: string,

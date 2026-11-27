@@ -22,6 +22,7 @@ export const ReviewHistoryTypeSchema = z.enum([
   'ai_plan',
   'ai_report',
   'approved',
+  'reopened',
 ]);
 export type ReviewHistoryType = z.infer<typeof ReviewHistoryTypeSchema>;
 
@@ -58,6 +59,7 @@ export interface NodeRow {
   title: string;
   description: string;
   status: NodeStatus;
+  previous_status: NodeStatus | null;
   scope_files: string;
   rules: string;
   checklist: string;
@@ -78,6 +80,7 @@ export interface PlanNode {
   title: string;
   description: string;
   status: NodeStatus;
+  previous_status: NodeStatus | null;
   scope_files: string[];
   rules: string;
   checklist: ChecklistItem[];
@@ -163,6 +166,12 @@ export const ApproveNodeSchema = z.object({
 });
 export type ApproveNodeInput = z.infer<typeof ApproveNodeSchema>;
 
+export const ReopenNodeSchema = z.object({
+  reason: z.string().trim().optional(),
+  cascade_scope: z.enum(['cascaded', 'all']).optional(),
+});
+export type ReopenNodeInput = z.infer<typeof ReopenNodeSchema>;
+
 export const ProjectExportBundleSchema = z.object({
   format: z.literal('vibedeck-project-export'),
   schema_version: z.literal(1),
@@ -195,6 +204,7 @@ export const ProjectExportBundleSchema = z.object({
         title: z.string().trim().min(1),
         description: z.string().optional().default(''),
         status: NodeStatusSchema.optional().default('planned'),
+        previous_status: NodeStatusSchema.nullable().optional().default(null),
         scope_files: z.array(z.string()).optional().default([]),
         rules: z.string().optional().default(''),
         checklist: z.array(ChecklistItemSchema).optional().default([]),

@@ -172,6 +172,7 @@ export function formatNodeContext(data: NodeWithAncestors): string {
       ai_plan: 'AI Revision Plan',
       ai_report: 'AI Report',
       approved: 'Approved',
+      reopened: 'Reopened',
     };
     lines.push('', '### Review & Revision Timeline');
     node.review_history.forEach((entry, index) => {

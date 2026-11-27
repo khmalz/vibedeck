@@ -3,6 +3,7 @@ import { Hono, type Context } from 'hono';
 import type { z } from 'zod';
 import { db } from '../db/client';
 import {
+  appendHistoryEntry,
   approveNodeById,
   createGroup,
   createProject,
@@ -15,6 +16,7 @@ import {
   getProjectTree,
   importProjectBundle,
   listProjects,
+  reopenNodeById,
   requestRevisionOnNode,
   syncPatchedHumanFeedback,
   updateNode,
@@ -25,6 +27,7 @@ import {
   CreateProjectSchema,
   PatchNodeSchema,
   ProjectExportBundleSchema,
+  ReopenNodeSchema,
   RequestRevisionSchema,
 } from '../types';
 import { sseBroadcaster, type SseBroadcaster } from './sse';
@@ -181,16 +184,35 @@ export function createApiRoutes(
       );
     }
 
-    const patchPayload =
+    const isTransitioningToDone =
+      existing.status !== 'done' && parsed.data.status === 'done';
+
+    const baseHistory =
       parsed.data.human_feedback !== undefined
-        ? {
-            ...parsed.data,
-            review_history: syncPatchedHumanFeedback(
-              existing.review_history,
-              parsed.data.human_feedback
-            ),
-          }
-        : parsed.data;
+        ? syncPatchedHumanFeedback(
+            existing.review_history,
+            parsed.data.human_feedback
+          )
+        : existing.review_history;
+
+    const shouldAppendApproved =
+      isTransitioningToDone &&
+      (parsed.data.human_feedback === undefined ||
+        parsed.data.human_feedback.trim() === '');
+
+    const nextHistory = shouldAppendApproved
+      ? appendHistoryEntry(baseHistory, 'approved', 'Approved (Done)')
+      : baseHistory;
+
+    const patchPayload = {
+      ...parsed.data,
+      ...(isTransitioningToDone && parsed.data.human_feedback === undefined
+        ? { human_feedback: '' }
+        : {}),
+      ...(nextHistory !== existing.review_history
+        ? { review_history: nextHistory }
+        : {}),
+    };
 
     const node = updateNode(projectId, nodeId, patchPayload, database);
     if (!node) {
@@ -238,6 +260,41 @@ export function createApiRoutes(
     }
     broadcaster.broadcast(projectId, 'project_updated');
     return c.json({ node });
+  });
+
+  routes.post('/projects/:projectId/nodes/:nodeId/reopen', async (c) => {
+    const projectId = c.req.param('projectId');
+    const nodeId = c.req.param('nodeId');
+    if (!getProjectById(projectId, database)) {
+      return c.json({ error: `Project "${projectId}" not found.` }, 404);
+    }
+
+    let body: { reason?: string; cascade_scope?: 'cascaded' | 'all' } = {};
+    const rawBody = await c.req.text();
+    if (rawBody.trim().length > 0) {
+      let jsonBody: unknown;
+      try {
+        jsonBody = JSON.parse(rawBody);
+      } catch {
+        return c.json({ error: 'Invalid JSON request body.' }, 400);
+      }
+      const parsed = ReopenNodeSchema.safeParse(jsonBody);
+      if (!parsed.success) {
+        return c.json(
+          { error: 'Validation failed.', details: parsed.error.issues },
+          400
+        );
+      }
+      body = parsed.data;
+    }
+
+    const result = reopenNodeById(projectId, nodeId, body, database);
+    if (!result.ok) {
+      return c.json({ error: result.error }, result.code === 'not_found' ? 404 : 400);
+    }
+
+    broadcaster.broadcast(projectId, 'project_updated');
+    return c.json({ node: result.node, reopened_count: result.reopenedCount });
   });
 
   routes.post('/projects/:projectId/nodes/:nodeId/request-revision', async (c) => {

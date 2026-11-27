@@ -12,6 +12,7 @@ import type {
   Project,
   ProjectExportBundle,
   ProjectTree,
+  ReopenNodeInput,
   ReviewHistoryEntry,
   ReviewHistoryType,
   UpsertPlanNodeInput,
@@ -34,6 +35,7 @@ function parseJsonArray<T>(raw: string, fallback: T[]): T[] {
 export function parseNodeRow(row: NodeRow): PlanNode {
   return {
     ...row,
+    previous_status: row.previous_status ?? null,
     description: row.description ?? '',
     rules: row.rules ?? '',
     ai_report: row.ai_report ?? '',
@@ -417,6 +419,7 @@ export interface UpdateNodeInput {
   title?: string;
   description?: string;
   status?: NodeStatus;
+  previous_status?: NodeStatus | null;
   scope_files?: string[];
   rules?: string;
   checklist?: ChecklistItem[];
@@ -426,88 +429,207 @@ export interface UpdateNodeInput {
   sort_order?: number;
 }
 
+function parseRawReviewHistory(raw: string): ReviewHistoryEntry[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as ReviewHistoryEntry[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function cascadeDoneToDescendants(
+  projectId: string,
+  rootNodeId: string,
+  now: string,
+  database: Database = db
+): void {
+  const selectStmt = database.prepare<
+    { id: string; status: NodeStatus; review_history: string },
+    { $projectId: string; $rootNodeId: string }
+  >(
+    `WITH RECURSIVE descendants(id, depth) AS (
+       SELECT id, 1
+       FROM nodes
+       WHERE parent_id = $rootNodeId AND project_id = $projectId
+       UNION ALL
+       SELECT n.id, d.depth + 1
+       FROM nodes n
+       JOIN descendants d ON n.parent_id = d.id AND n.project_id = $projectId
+       WHERE d.depth < 100
+     )
+     SELECT n.id, n.status, n.review_history
+     FROM nodes n
+     JOIN (SELECT DISTINCT id FROM descendants) d ON n.id = d.id
+     WHERE n.project_id = $projectId AND n.status != 'done'`
+  );
+
+  const updateStmt = database.prepare<
+    unknown,
+    {
+      $id: string;
+      $projectId: string;
+      $previousStatus: NodeStatus;
+      $reviewHistory: string;
+      $updatedAt: string;
+    }
+  >(
+    `UPDATE nodes
+     SET status = 'done',
+         previous_status = $previousStatus,
+         human_feedback = '',
+         review_history = $reviewHistory,
+         updated_at = $updatedAt
+     WHERE id = $id AND project_id = $projectId`
+  );
+
+  try {
+    const unfinished = selectStmt.all({
+      $projectId: projectId,
+      $rootNodeId: rootNodeId,
+    });
+
+    for (const child of unfinished) {
+      const history = parseRawReviewHistory(child.review_history);
+      const nextHistory = appendHistoryEntry(
+        history,
+        'approved',
+        'Marked done via parent',
+        now
+      );
+
+      updateStmt.run({
+        $id: child.id,
+        $projectId: projectId,
+        $previousStatus: child.status,
+        $reviewHistory: JSON.stringify(nextHistory),
+        $updatedAt: now,
+      });
+    }
+  } finally {
+    selectStmt.finalize();
+    updateStmt.finalize();
+  }
+}
+
 export function updateNode(
   projectId: string,
   nodeId: string,
   patch: UpdateNodeInput,
   database: Database = db
 ): PlanNode | null {
-  const existing = getNodeById(projectId, nodeId, database);
-  if (!existing) {
-    return null;
-  }
-
-  const now = nowIso();
-  database
-    .query<
-      unknown,
-      {
-        $id: string;
-        $projectId: string;
-        $groupId: string | null;
-        $parentId: string | null;
-        $nodeType: NodeType;
-        $title: string;
-        $description: string;
-        $status: NodeStatus;
-        $scopeFiles: string;
-        $rules: string;
-        $checklist: string;
-        $aiReport: string;
-        $humanFeedback: string;
-        $reviewHistory: string;
-        $sortOrder: number;
-        $updatedAt: string;
-      }
-    >(
-      `UPDATE nodes SET
-         group_id = $groupId,
-         parent_id = $parentId,
-         node_type = $nodeType,
-         title = $title,
-         description = $description,
-         status = $status,
-         scope_files = $scopeFiles,
-         rules = $rules,
-         checklist = $checklist,
-         ai_report = $aiReport,
-         human_feedback = $humanFeedback,
-         review_history = $reviewHistory,
-         sort_order = $sortOrder,
-         updated_at = $updatedAt
-       WHERE id = $id AND project_id = $projectId`
-    )
-    .run({
-      $id: nodeId,
-      $projectId: projectId,
-      $groupId: patch.group_id !== undefined ? patch.group_id : existing.group_id,
-      $parentId: patch.parent_id !== undefined ? patch.parent_id : existing.parent_id,
-      $nodeType: patch.node_type ?? existing.node_type,
-      $title: patch.title ?? existing.title,
-      $description: patch.description ?? existing.description,
-      $status: patch.status ?? existing.status,
-      $scopeFiles: JSON.stringify(patch.scope_files ?? existing.scope_files),
-      $rules: patch.rules ?? existing.rules,
-      $checklist: JSON.stringify(patch.checklist ?? existing.checklist),
-      $aiReport: patch.ai_report ?? existing.ai_report,
-      $humanFeedback: patch.human_feedback ?? existing.human_feedback,
-      $reviewHistory: JSON.stringify(patch.review_history ?? existing.review_history),
-      $sortOrder: patch.sort_order ?? existing.sort_order,
-      $updatedAt: now,
-    });
-
-  const nextParentId =
-    patch.parent_id !== undefined ? patch.parent_id : existing.parent_id;
-
-  if (patch.status !== undefined || patch.parent_id !== undefined) {
-    rollupAncestorModuleStatuses(projectId, nextParentId, database);
-    if (existing.parent_id && existing.parent_id !== nextParentId) {
-      rollupAncestorModuleStatuses(projectId, existing.parent_id, database);
+  const runUpdate = database.transaction((): PlanNode | null => {
+    const existing = getNodeById(projectId, nodeId, database);
+    if (!existing) {
+      return null;
     }
-  }
 
-  touchProject(projectId, database);
-  return getNodeById(projectId, nodeId, database);
+    const now = nowIso();
+    const nextStatus = patch.status ?? existing.status;
+    const nextPreviousStatus =
+      patch.previous_status !== undefined
+        ? patch.previous_status
+        : existing.status !== 'done' && nextStatus === 'done'
+          ? existing.status
+          : existing.status === 'done' && nextStatus !== 'done'
+            ? null
+            : existing.previous_status;
+
+    let nextHistory = patch.review_history ?? existing.review_history;
+    if (
+      existing.status === 'done' &&
+      patch.status !== undefined &&
+      patch.status !== 'done' &&
+      patch.review_history === undefined
+    ) {
+      nextHistory = appendHistoryEntry(
+        nextHistory,
+        'reopened',
+        `Reopened from done back to \`${nextStatus}\`.`,
+        now
+      );
+    }
+
+    database
+      .query<
+        unknown,
+        {
+          $id: string;
+          $projectId: string;
+          $groupId: string | null;
+          $parentId: string | null;
+          $nodeType: NodeType;
+          $title: string;
+          $description: string;
+          $status: NodeStatus;
+          $previousStatus: NodeStatus | null;
+          $scopeFiles: string;
+          $rules: string;
+          $checklist: string;
+          $aiReport: string;
+          $humanFeedback: string;
+          $reviewHistory: string;
+          $sortOrder: number;
+          $updatedAt: string;
+        }
+      >(
+        `UPDATE nodes SET
+           group_id = $groupId,
+           parent_id = $parentId,
+           node_type = $nodeType,
+           title = $title,
+           description = $description,
+           status = $status,
+           previous_status = $previousStatus,
+           scope_files = $scopeFiles,
+           rules = $rules,
+           checklist = $checklist,
+           ai_report = $aiReport,
+           human_feedback = $humanFeedback,
+           review_history = $reviewHistory,
+           sort_order = $sortOrder,
+           updated_at = $updatedAt
+         WHERE id = $id AND project_id = $projectId`
+      )
+      .run({
+        $id: nodeId,
+        $projectId: projectId,
+        $groupId: patch.group_id !== undefined ? patch.group_id : existing.group_id,
+        $parentId: patch.parent_id !== undefined ? patch.parent_id : existing.parent_id,
+        $nodeType: patch.node_type ?? existing.node_type,
+        $title: patch.title ?? existing.title,
+        $description: patch.description ?? existing.description,
+        $status: nextStatus,
+        $previousStatus: nextPreviousStatus,
+        $scopeFiles: JSON.stringify(patch.scope_files ?? existing.scope_files),
+        $rules: patch.rules ?? existing.rules,
+        $checklist: JSON.stringify(patch.checklist ?? existing.checklist),
+        $aiReport: patch.ai_report ?? existing.ai_report,
+        $humanFeedback: patch.human_feedback ?? existing.human_feedback,
+        $reviewHistory: JSON.stringify(nextHistory),
+        $sortOrder: patch.sort_order ?? existing.sort_order,
+        $updatedAt: now,
+      });
+
+    if (patch.status === 'done') {
+      cascadeDoneToDescendants(projectId, nodeId, now, database);
+    }
+
+    const nextParentId =
+      patch.parent_id !== undefined ? patch.parent_id : existing.parent_id;
+
+    if (patch.status !== undefined || patch.parent_id !== undefined) {
+      rollupAncestorModuleStatuses(projectId, nextParentId, database);
+      if (existing.parent_id && existing.parent_id !== nextParentId) {
+        rollupAncestorModuleStatuses(projectId, existing.parent_id, database);
+      }
+    }
+
+    touchProject(projectId, database);
+    return getNodeById(projectId, nodeId, database);
+  });
+
+  return runUpdate();
 }
 
 /** Recompute status for every ancestor module bottom-up from startParentId. */
@@ -559,7 +681,7 @@ export function rollupAncestorModuleStatuses(
   }
 }
 
-function appendHistoryEntry(
+export function appendHistoryEntry(
   history: ReviewHistoryEntry[],
   type: ReviewHistoryType,
   content: string,
@@ -656,6 +778,268 @@ export function approveNodeById(
     },
     database
   );
+}
+
+function resolveReopenFallbackStatus(node: {
+  previous_status: NodeStatus | null;
+  ai_report: string;
+}): NodeStatus {
+  if (node.previous_status && node.previous_status !== 'done') {
+    return node.previous_status;
+  }
+  return node.ai_report.trim() ? 'needs_review' : 'in_progress';
+}
+
+export type ReopenNodeResult =
+  | { ok: true; node: PlanNode; reopenedCount: number }
+  | { ok: false; code: 'not_found' | 'not_done'; error: string };
+
+export function reopenNodeById(
+  projectId: string,
+  nodeId: string,
+  input: ReopenNodeInput = {},
+  database: Database = db
+): ReopenNodeResult {
+  const runReopen = database.transaction((): ReopenNodeResult => {
+    const existing = getNodeById(projectId, nodeId, database);
+    if (!existing) {
+      return {
+        ok: false,
+        code: 'not_found',
+        error: `Node "${nodeId}" not found in project "${projectId}".`,
+      };
+    }
+    if (existing.status !== 'done') {
+      return {
+        ok: false,
+        code: 'not_done',
+        error: 'Only done nodes can be reopened.',
+      };
+    }
+
+    const now = nowIso();
+    const reason = input.reason?.trim() ?? '';
+
+    const descendantsStmt = database.prepare<
+      {
+        id: string;
+        parent_id: string | null;
+        node_type: NodeType;
+        status: NodeStatus;
+        previous_status: NodeStatus | null;
+        ai_report: string;
+        review_history: string;
+        depth: number;
+      },
+      { $projectId: string; $rootNodeId: string }
+    >(
+      `WITH RECURSIVE descendants(id, depth) AS (
+         SELECT id, 1
+         FROM nodes
+         WHERE parent_id = $rootNodeId AND project_id = $projectId
+         UNION ALL
+         SELECT n.id, d.depth + 1
+         FROM nodes n
+         JOIN descendants d ON n.parent_id = d.id AND n.project_id = $projectId
+         WHERE d.depth < 100
+       )
+       SELECT n.id, n.parent_id, n.node_type, n.status, n.previous_status, n.ai_report, n.review_history, d.depth
+       FROM nodes n
+       JOIN (SELECT id, MIN(depth) AS depth FROM descendants GROUP BY id) d ON n.id = d.id
+       WHERE n.project_id = $projectId
+       ORDER BY d.depth DESC`
+    );
+
+    const updateRowStmt = database.prepare<
+      unknown,
+      {
+        $id: string;
+        $projectId: string;
+        $status: NodeStatus;
+        $humanFeedback: string;
+        $reviewHistory: string;
+        $updatedAt: string;
+      }
+    >(
+      `UPDATE nodes
+       SET status = $status,
+           previous_status = NULL,
+           human_feedback = $humanFeedback,
+           review_history = $reviewHistory,
+           updated_at = $updatedAt
+       WHERE id = $id AND project_id = $projectId`
+    );
+
+    const childStatusStmt = database.prepare<
+      { status: NodeStatus },
+      { $projectId: string; $parentId: string }
+    >(
+      'SELECT status FROM nodes WHERE project_id = $projectId AND parent_id = $parentId'
+    );
+
+    const updateModStatusStmt = database.prepare<
+      unknown,
+      { $id: string; $projectId: string; $status: NodeStatus; $updatedAt: string }
+    >(
+      'UPDATE nodes SET status = $status, updated_at = $updatedAt WHERE id = $id AND project_id = $projectId'
+    );
+
+    let targetsCount = 0;
+
+    try {
+      const descendants = descendantsStmt.all({
+        $projectId: projectId,
+        $rootNodeId: nodeId,
+      });
+
+      const doneDescendants = descendants.filter((d) => d.status === 'done');
+      const cascadedDoneDescendants = doneDescendants.filter((d) => {
+        const hist = parseRawReviewHistory(d.review_history);
+        const last = hist[hist.length - 1];
+        return last?.type === 'approved' && last.content === 'Marked done via parent';
+      });
+
+      const scope =
+        input.cascade_scope ??
+        (cascadedDoneDescendants.length > 0 ? 'cascaded' : 'all');
+
+      const targets =
+        doneDescendants.length > 0
+          ? scope === 'cascaded' && cascadedDoneDescendants.length > 0
+            ? cascadedDoneDescendants
+            : doneDescendants
+          : [];
+
+      targetsCount = targets.length;
+      const targetIdSet = new Set(targets.map((t) => t.id));
+
+      for (const child of targets) {
+        if (child.node_type === 'module') {
+          continue;
+        }
+        const restoredStatus: NodeStatus = reason
+          ? 'in_progress'
+          : resolveReopenFallbackStatus(child);
+        const content = reason
+          ? `Reopened via parent back to \`${restoredStatus}\`: ${reason}`
+          : `Reopened via parent back to \`${restoredStatus}\` (human undo — no revision requested).`;
+        const nextHistory = appendHistoryEntry(
+          parseRawReviewHistory(child.review_history),
+          'reopened',
+          content,
+          now
+        );
+        updateRowStmt.run({
+          $id: child.id,
+          $projectId: projectId,
+          $status: restoredStatus,
+          $humanFeedback: reason,
+          $reviewHistory: JSON.stringify(nextHistory),
+          $updatedAt: now,
+        });
+      }
+
+      // Update descendant modules deepest-first (descendants is already sorted by depth DESC)
+      for (const desc of descendants) {
+        if (desc.node_type !== 'module') {
+          continue;
+        }
+        const childRows = childStatusStmt.all({
+          $projectId: projectId,
+          $parentId: desc.id,
+        });
+        const isReopenedTarget = targetIdSet.has(desc.id);
+        const derivedStatus: NodeStatus =
+          childRows.length > 0
+            ? deriveModuleStatus(childRows.map((r) => r.status))
+            : isReopenedTarget
+              ? reason
+                ? 'in_progress'
+                : resolveReopenFallbackStatus(desc)
+              : desc.status;
+
+        if (isReopenedTarget) {
+          const content = reason
+            ? `Reopened via parent back to \`${derivedStatus}\`: ${reason}`
+            : `Reopened via parent back to \`${derivedStatus}\` (human undo — no revision requested).`;
+          const nextHistory = appendHistoryEntry(
+            parseRawReviewHistory(desc.review_history),
+            'reopened',
+            content,
+            now
+          );
+          updateRowStmt.run({
+            $id: desc.id,
+            $projectId: projectId,
+            $status: derivedStatus,
+            $humanFeedback: '',
+            $reviewHistory: JSON.stringify(nextHistory),
+            $updatedAt: now,
+          });
+        } else if (derivedStatus !== desc.status) {
+          updateModStatusStmt.run({
+            $id: desc.id,
+            $projectId: projectId,
+            $status: derivedStatus,
+            $updatedAt: now,
+          });
+        }
+      }
+
+      let targetRestoredStatus: NodeStatus;
+      if (existing.node_type === 'module' && descendants.length > 0) {
+        const directChildren = childStatusStmt.all({
+          $projectId: projectId,
+          $parentId: existing.id,
+        });
+        targetRestoredStatus =
+          directChildren.length > 0
+            ? deriveModuleStatus(directChildren.map((r) => r.status))
+            : reason
+              ? 'in_progress'
+              : resolveReopenFallbackStatus(existing);
+      } else {
+        targetRestoredStatus = reason
+          ? 'in_progress'
+          : resolveReopenFallbackStatus(existing);
+      }
+
+      const targetContent = reason
+        ? `Reopened from done (was \`${existing.previous_status ?? 'done'}\`): ${reason}`
+        : `Reopened from done back to \`${targetRestoredStatus}\` (human undo — no revision requested).`;
+      const nextTargetHistory = appendHistoryEntry(
+        existing.review_history,
+        'reopened',
+        targetContent,
+        now
+      );
+
+      updateRowStmt.run({
+        $id: existing.id,
+        $projectId: projectId,
+        $status: targetRestoredStatus,
+        $humanFeedback: reason,
+        $reviewHistory: JSON.stringify(nextTargetHistory),
+        $updatedAt: now,
+      });
+    } finally {
+      descendantsStmt.finalize();
+      updateRowStmt.finalize();
+      childStatusStmt.finalize();
+      updateModStatusStmt.finalize();
+    }
+
+    rollupAncestorModuleStatuses(projectId, existing.parent_id, database);
+    touchProject(projectId, database);
+
+    return {
+      ok: true,
+      node: getNodeById(projectId, nodeId, database)!,
+      reopenedCount: 1 + targetsCount,
+    };
+  });
+
+  return runReopen();
 }
 
 export function startNodeExecution(
@@ -890,7 +1274,7 @@ export function exportProjectBundle(
   return {
     format: 'vibedeck-project-export',
     schema_version: 1,
-    app_version: '0.1.2',
+    app_version: '0.1.3',
     exported_at: nowIso(),
     project: tree.project,
     groups: tree.groups,
@@ -1001,6 +1385,7 @@ export function importProjectBundle(
         $title: string;
         $description: string;
         $status: NodeStatus;
+        $previousStatus: NodeStatus | null;
         $scopeFiles: string;
         $rules: string;
         $checklist: string;
@@ -1014,11 +1399,11 @@ export function importProjectBundle(
     >(
       `INSERT INTO nodes (
          id, project_id, group_id, parent_id, node_type, title, description,
-         status, scope_files, rules, checklist, ai_report, human_feedback,
+         status, previous_status, scope_files, rules, checklist, ai_report, human_feedback,
          review_history, sort_order, created_at, updated_at
        ) VALUES (
          $id, $projectId, $groupId, $parentId, $nodeType, $title, $description,
-         $status, $scopeFiles, $rules, $checklist, $aiReport, $humanFeedback,
+         $status, $previousStatus, $scopeFiles, $rules, $checklist, $aiReport, $humanFeedback,
          $reviewHistory, $sortOrder, $createdAt, $updatedAt
        )`
     );
@@ -1079,6 +1464,7 @@ export function importProjectBundle(
             $title: node.title,
             $description: node.description ?? '',
             $status: node.status ?? 'planned',
+            $previousStatus: node.previous_status ?? null,
             $scopeFiles: JSON.stringify(node.scope_files ?? []),
             $rules: node.rules ?? '',
             $checklist: JSON.stringify(node.checklist ?? []),

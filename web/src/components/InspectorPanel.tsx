@@ -22,6 +22,7 @@ import {
   approveNode,
   deleteNode,
   patchNode,
+  reopenNode,
   requestNodeRevision,
 } from '../api/client';
 import type {
@@ -37,6 +38,7 @@ interface InspectorPanelProps {
   projectId: string | null;
   node: PlanNode | null;
   ancestors: PlanNode[];
+  descendants: PlanNode[];
   groupName: string | null;
   onSelectNode: (nodeId: string) => void;
   onNodeUpdated: (node: PlanNode) => void;
@@ -218,6 +220,7 @@ export function InspectorPanel({
   projectId,
   node,
   ancestors,
+  descendants,
   groupName,
   onSelectNode,
   onNodeUpdated,
@@ -237,6 +240,10 @@ export function InspectorPanel({
   const [editingFeedback, setEditingFeedback] = useState(false);
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [pendingDoneAction, setPendingDoneAction] = useState<'approve' | 'save' | null>(null);
+  const [reopenModalOpen, setReopenModalOpen] = useState(false);
+  const [reopenReason, setReopenReason] = useState('');
+  const [reopenScope, setReopenScope] = useState<'cascaded' | 'all'>('cascaded');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -246,6 +253,10 @@ export function InspectorPanel({
     setEditingFeedback(false);
     setShowAllHistory(false);
     setConfirmingDelete(false);
+    setPendingDoneAction(null);
+    setReopenModalOpen(false);
+    setReopenReason('');
+    setReopenScope('cascaded');
     setError(null);
     setNewChecklistText('');
     setDraftTitle(node?.title ?? '');
@@ -284,6 +295,18 @@ export function InspectorPanel({
     checklistKey,
     editing,
   ]);
+
+  useEffect(() => {
+    if (!pendingDoneAction && !reopenModalOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) {
+        setPendingDoneAction(null);
+        setReopenModalOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [pendingDoneAction, reopenModalOpen, busy]);
 
   if (!projectId || !node) {
     return (
@@ -355,7 +378,9 @@ export function InspectorPanel({
     setNewChecklistText('');
   };
 
-  const handleSaveDetails = async () => {
+  const unfinishedDescendants = descendants.filter((d) => d.status !== 'done');
+
+  const executeSaveDetails = async () => {
     const trimmedTitle = draftTitle.trim();
     if (!trimmedTitle) {
       setError('Title cannot be empty.');
@@ -389,6 +414,7 @@ export function InspectorPanel({
       onNodeUpdated(updated);
       setNewChecklistText('');
       setEditing(false);
+      setPendingDoneAction(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save changes.');
     } finally {
@@ -396,7 +422,25 @@ export function InspectorPanel({
     }
   };
 
-  const handleApprove = async () => {
+  const handleSaveDetails = async () => {
+    if (!draftTitle.trim()) {
+      setError('Title cannot be empty.');
+      return;
+    }
+
+    if (
+      node.status !== 'done' &&
+      draftStatus === 'done' &&
+      unfinishedDescendants.length > 0
+    ) {
+      setPendingDoneAction('save');
+      return;
+    }
+
+    await executeSaveDetails();
+  };
+
+  const executeApprove = async () => {
     setBusy(true);
     setError(null);
     try {
@@ -404,8 +448,49 @@ export function InspectorPanel({
       onNodeUpdated(updated);
       setFeedback('');
       setEditingFeedback(false);
+      setPendingDoneAction(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to approve node.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleApprove = async () => {
+    if (unfinishedDescendants.length > 0) {
+      setPendingDoneAction('approve');
+      return;
+    }
+
+    await executeApprove();
+  };
+
+  const doneDescendants = descendants.filter((d) => d.status === 'done');
+  const cascadedDoneDescendants = doneDescendants.filter((d) => {
+    const last = d.review_history[d.review_history.length - 1];
+    return last?.type === 'approved' && last.content === 'Marked done via parent';
+  });
+
+  const openReopenModal = () => {
+    setReopenReason('');
+    setReopenScope(cascadedDoneDescendants.length > 0 ? 'cascaded' : 'all');
+    setError(null);
+    setReopenModalOpen(true);
+  };
+
+  const executeReopen = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await reopenNode(projectId, node.id, {
+        reason: reopenReason.trim() || undefined,
+        cascade_scope: doneDescendants.length > 0 ? reopenScope : undefined,
+      });
+      onNodeUpdated(updated);
+      setReopenReason('');
+      setReopenModalOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to reopen node.');
     } finally {
       setBusy(false);
     }
@@ -980,6 +1065,11 @@ export function InspectorPanel({
             dot: 'bg-[#3ECF8E]',
             badge: 'border-[#3ECF8E]/35 bg-[#3ECF8E]/12 text-[#64DFA8]',
           },
+          reopened: {
+            label: 'You · Reopened',
+            dot: 'bg-[#E5A93C]',
+            badge: 'border-[#E5A93C]/35 bg-[#E5A93C]/12 text-[#F0BE63]',
+          },
         };
 
         return (
@@ -1097,14 +1187,25 @@ export function InspectorPanel({
 
       <div className="rounded-lg border border-[#272B36] bg-[#181B22] p-4">
         {node.status === 'done' ? (
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-1.5 text-[13px] font-semibold text-[#E6E8EE]">
               <CheckCircle2 className="h-4 w-4 text-[#3ECF8E]" />
               <span>Approved</span>
             </div>
-            <span className="rounded border border-[#3ECF8E]/35 bg-[#3ECF8E]/12 px-2 py-0.5 text-[11px] font-medium text-[#64DFA8]">
-              Approved — node marked done.
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="rounded border border-[#3ECF8E]/35 bg-[#3ECF8E]/12 px-2 py-0.5 text-[11px] font-medium text-[#64DFA8]">
+                Approved — node marked done.
+              </span>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={openReopenModal}
+                className="inline-flex h-7 items-center gap-1.5 rounded border border-[#E5A93C]/45 bg-[#E5A93C]/10 px-2.5 text-[11px] font-medium text-[#F0BE63] transition-colors hover:bg-[#E5A93C]/20 disabled:opacity-50"
+              >
+                <RotateCcw className="h-3 w-3" />
+                <span>Reopen</span>
+              </button>
+            </div>
           </div>
         ) : node.status === 'in_progress' &&
           node.human_feedback.trim() &&
@@ -1207,6 +1308,201 @@ export function InspectorPanel({
           </>
         )}
       </div>
+
+      {pendingDoneAction !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-xs"
+          onClick={() => {
+            if (!busy) setPendingDoneAction(null);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-cascade-done-title"
+            className="w-full max-w-md rounded-xl border border-[#272B36] bg-[#181B22] p-5 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3
+              id="confirm-cascade-done-title"
+              className="text-sm font-semibold text-[#E6E8EE]"
+            >
+              Mark {node.title} and all child plans as Done?
+            </h3>
+            <p className="mt-2 text-xs leading-relaxed text-[#8B92A5]">
+              Setting this parent to Done will also mark{' '}
+              <span className="font-medium text-[#E6E8EE]">
+                {unfinishedDescendants.length}
+              </span>{' '}
+              unfinished {unfinishedDescendants.length === 1 ? 'child' : 'children'} as Done:
+            </p>
+            <ul className="mt-3 max-h-40 space-y-1.5 overflow-y-auto rounded-lg border border-[#272B36] bg-[#111318] p-2.5 text-xs text-[#E6E8EE]">
+              {unfinishedDescendants.slice(0, 6).map((child) => (
+                <li key={child.id} className="flex items-center justify-between gap-2">
+                  <span className="truncate">{child.title}</span>
+                  <span className="shrink-0 font-mono text-[10px] text-[#8B92A5]">
+                    {child.status}
+                  </span>
+                </li>
+              ))}
+              {unfinishedDescendants.length > 6 && (
+                <li className="pt-0.5 text-[11px] text-[#8B92A5]">
+                  +{unfinishedDescendants.length - 6} more
+                </li>
+              )}
+            </ul>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setPendingDoneAction(null)}
+                className="rounded-lg border border-[#272B36] bg-[#1F242E] px-3 py-1.5 text-xs font-medium text-[#E6E8EE] transition-colors hover:bg-[#272B36] disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  if (pendingDoneAction === 'approve') {
+                    void executeApprove();
+                  } else {
+                    void executeSaveDetails();
+                  }
+                }}
+                className="rounded-lg bg-[#3ECF8E] px-3 py-1.5 text-xs font-semibold text-[#111318] transition-colors hover:bg-[#35b87e] disabled:opacity-50"
+              >
+                {busy ? 'Marking Done...' : 'Mark all Done'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {reopenModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-xs"
+          onClick={() => {
+            if (!busy) setReopenModalOpen(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reopen-node-title"
+            className="w-full max-w-md rounded-xl border border-[#272B36] bg-[#181B22] p-5 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 id="reopen-node-title" className="text-sm font-semibold text-[#E6E8EE]">
+              Reopen {node.title}?
+            </h3>
+
+            {doneDescendants.length === 0 ? (
+              <p className="mt-2 text-xs leading-relaxed text-[#8B92A5]">
+                Status will revert to{' '}
+                <span className="rounded border border-[#E5A93C]/35 bg-[#E5A93C]/12 px-1.5 py-0.5 font-mono text-[11px] text-[#F0BE63]">
+                  {reopenReason.trim()
+                    ? 'in_progress (with feedback for AI)'
+                    : (node.previous_status ??
+                        (node.ai_report.trim() ? 'needs_review' : 'in_progress'))}
+                </span>
+                .
+              </p>
+            ) : (
+              (() => {
+                const effectiveTargets =
+                  reopenScope === 'cascaded' && cascadedDoneDescendants.length > 0
+                    ? cascadedDoneDescendants
+                    : doneDescendants;
+                const hasMixedDoneChildren =
+                  cascadedDoneDescendants.length > 0 &&
+                  cascadedDoneDescendants.length < doneDescendants.length;
+                const hasReason = Boolean(reopenReason.trim());
+
+                return (
+                  <div className="mt-2 space-y-2.5">
+                    <p className="text-xs leading-relaxed text-[#8B92A5]">
+                      This will reopen{' '}
+                      <span className="font-medium text-[#E6E8EE]">
+                        {effectiveTargets.length}
+                      </span>{' '}
+                      {effectiveTargets.length === 1 ? 'child' : 'children'} to their
+                      restored status:
+                    </p>
+                    <ul className="max-h-40 space-y-1.5 overflow-y-auto rounded-lg border border-[#272B36] bg-[#111318] p-2.5 text-xs text-[#E6E8EE]">
+                      {effectiveTargets.slice(0, 6).map((child) => {
+                        const targetStatus =
+                          hasReason && child.node_type !== 'module'
+                            ? 'in_progress'
+                            : (child.previous_status ??
+                                (child.ai_report.trim() ? 'needs_review' : 'in_progress'));
+                        return (
+                          <li
+                            key={child.id}
+                            className="flex items-center justify-between gap-2"
+                          >
+                            <span className="truncate">{child.title}</span>
+                            <span className="shrink-0 font-mono text-[10px] text-[#F0BE63]">
+                              {targetStatus}
+                            </span>
+                          </li>
+                        );
+                      })}
+                      {effectiveTargets.length > 6 && (
+                        <li className="pt-0.5 text-[11px] text-[#8B92A5]">
+                          +{effectiveTargets.length - 6} more
+                        </li>
+                      )}
+                    </ul>
+                    {hasMixedDoneChildren && (
+                      <label className="flex cursor-pointer items-center gap-2 text-xs text-[#8B92A5]">
+                        <input
+                          type="checkbox"
+                          checked={reopenScope === 'all'}
+                          onChange={(e) =>
+                            setReopenScope(e.target.checked ? 'all' : 'cascaded')
+                          }
+                          className="h-3.5 w-3.5 rounded border-[#272B36] bg-[#111318] accent-[#E5A93C]"
+                        />
+                        <span>
+                          Include earlier done children ({doneDescendants.length} total)
+                        </span>
+                      </label>
+                    )}
+                  </div>
+                );
+              })()
+            )}
+
+            <textarea
+              rows={3}
+              value={reopenReason}
+              onChange={(e) => setReopenReason(e.target.value)}
+              placeholder="Optional: describe what failed verification (leave blank to undo accidental Done and restore previous status)"
+              className="mt-3 w-full rounded-lg border border-[#272B36] bg-[#111318] px-3 py-2 text-xs text-[#E6E8EE] placeholder-[#6E768A] focus:border-[#E5A93C] focus:outline-none"
+            />
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setReopenModalOpen(false)}
+                className="rounded-lg border border-[#272B36] bg-[#1F242E] px-3 py-1.5 text-xs font-medium text-[#E6E8EE] transition-colors hover:bg-[#272B36] disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void executeReopen()}
+                className="rounded-lg bg-[#E5A93C] px-3 py-1.5 text-xs font-semibold text-[#111318] transition-colors hover:bg-[#F0BE63] disabled:opacity-50"
+              >
+                {busy ? 'Reopening...' : 'Reopen'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

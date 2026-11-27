@@ -143,6 +143,36 @@ export default function App() {
     return groups.find((g) => g.id === selectedNode.group_id)?.name ?? null;
   }, [groups, selectedNode]);
 
+  const selectedDescendants = useMemo(() => {
+    if (!selectedNode) {
+      return [];
+    }
+    const childrenByParent = new Map<string, PlanNode[]>();
+    for (const item of nodes) {
+      if (!item.parent_id) continue;
+      const list = childrenByParent.get(item.parent_id);
+      if (list) {
+        list.push(item);
+      } else {
+        childrenByParent.set(item.parent_id, [item]);
+      }
+    }
+    const result: PlanNode[] = [];
+    const visited = new Set<string>([selectedNode.id]);
+    const queue: string[] = [selectedNode.id];
+    while (queue.length > 0) {
+      const currentId = queue.shift()!;
+      const children = childrenByParent.get(currentId) ?? [];
+      for (const child of children) {
+        if (visited.has(child.id)) continue;
+        visited.add(child.id);
+        result.push(child);
+        queue.push(child.id);
+      }
+    }
+    return result;
+  }, [nodes, selectedNode]);
+
   const handleOpenAddProject = () => {
     setModalProject(null);
     setModalOpen(true);
@@ -162,9 +192,15 @@ export default function App() {
     setSelectedNodeId(null);
   };
 
-  const handleNodeUpdated = useCallback((updated: PlanNode) => {
-    setNodes((prev) => prev.map((n) => (n.id === updated.id ? updated : n)));
-  }, []);
+  const handleNodeUpdated = useCallback(
+    (updated: PlanNode) => {
+      setNodes((prev) => prev.map((n) => (n.id === updated.id ? updated : n)));
+      if (activeProjectId) {
+        void loadTree(activeProjectId);
+      }
+    },
+    [activeProjectId, loadTree]
+  );
 
   const handleNodeDeleted = useCallback(
     (deletedId: string) => {
@@ -321,6 +357,7 @@ export default function App() {
             projectId={activeProjectId}
             node={selectedNode}
             ancestors={selectedAncestors}
+            descendants={selectedDescendants}
             groupName={selectedGroupName}
             onSelectNode={setSelectedNodeId}
             onNodeUpdated={handleNodeUpdated}

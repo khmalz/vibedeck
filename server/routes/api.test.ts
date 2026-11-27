@@ -581,4 +581,426 @@ describe('REST API & SSE Live Broadcaster', () => {
     await apiJson(`/api/projects/${proj.id}`, { method: 'DELETE' });
     await apiJson(`/api/projects/${duplicate.body.project.id}`, { method: 'DELETE' });
   });
+
+  test('cascades done status to unfinished descendants and rolls up ancestors', async () => {
+    const createdProj = await apiJson<{ project: { id: string } }>('/api/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Cascade Done Test Project' }),
+    });
+    expect(createdProj.status).toBe(201);
+    const projectId = createdProj.body.project.id;
+
+    const seedRes = await apiJson<{ result: { content: Array<{ text: string }> } }>(
+      `/mcp/${projectId}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'upsert_plan',
+            arguments: {
+              group_name: 'Phase 1',
+              nodes: [
+                {
+                  node_type: 'module',
+                  title: 'Root Module',
+                  children: [
+                    {
+                      node_type: 'module',
+                      title: 'Sub Module',
+                      children: [
+                        { node_type: 'task', title: 'Task A' },
+                        { node_type: 'task', title: 'Task B' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        }),
+      }
+    );
+    expect(seedRes.status).toBe(200);
+
+    const seededTree = await apiJson<ProjectTree>(`/api/projects/${projectId}/tree`);
+    expect(seededTree.status).toBe(200);
+    const rootMod = seededTree.body.nodes.find((n) => n.title === 'Root Module')!;
+    const subMod = seededTree.body.nodes.find((n) => n.title === 'Sub Module')!;
+    const taskA = seededTree.body.nodes.find((n) => n.title === 'Task A')!;
+    const taskB = seededTree.body.nodes.find((n) => n.title === 'Task B')!;
+    expect(rootMod).toBeDefined();
+    expect(subMod).toBeDefined();
+    expect(taskA).toBeDefined();
+    expect(taskB).toBeDefined();
+
+    // Give Task B pending human_feedback
+    const taskBRev = await apiJson<{ node: PlanNode }>(
+      `/api/projects/${projectId}/nodes/${taskB.id}/request-revision`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ human_feedback: 'Needs extra check' }),
+      }
+    );
+    expect(taskBRev.status).toBe(200);
+    expect(taskBRev.body.node.human_feedback).toBe('Needs extra check');
+
+    // Mark Sub Module as done via PATCH -> Task A, Task B, and Root Module must become done
+    const patchedSub = await apiJson<{ node: PlanNode }>(
+      `/api/projects/${projectId}/nodes/${subMod.id}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'done' }),
+      }
+    );
+    expect(patchedSub.status).toBe(200);
+    expect(patchedSub.body.node.status).toBe('done');
+
+    const treeAfterPatch = await apiJson<ProjectTree>(`/api/projects/${projectId}/tree`);
+    expect(treeAfterPatch.status).toBe(200);
+
+    const byId = new Map(treeAfterPatch.body.nodes.map((n) => [n.id, n]));
+    expect(byId.get(subMod.id)?.status).toBe('done');
+    expect(byId.get(rootMod.id)?.status).toBe('done');
+    expect(byId.get(taskA.id)?.status).toBe('done');
+    expect(byId.get(taskB.id)?.status).toBe('done');
+    expect(byId.get(taskB.id)?.human_feedback).toBe('');
+    expect(
+      byId.get(taskA.id)?.review_history.some(
+        (h) => h.type === 'approved' && h.content === 'Marked done via parent'
+      )
+    ).toBe(true);
+    expect(
+      byId.get(taskB.id)?.review_history.some(
+        (h) => h.type === 'approved' && h.content === 'Marked done via parent'
+      )
+    ).toBe(true);
+
+    // Also verify approve endpoint cascades to unfinished descendants
+    const seedTaskC = await apiJson<{ result: { content: Array<{ text: string }> } }>(
+      `/mcp/${projectId}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/call',
+          params: {
+            name: 'upsert_plan',
+            arguments: {
+              group_name: 'Phase 1',
+              nodes: [
+                {
+                  id: subMod.id,
+                  node_type: 'module',
+                  title: 'Sub Module',
+                  children: [{ node_type: 'task', title: 'Task C' }],
+                },
+              ],
+            },
+          },
+        }),
+      }
+    );
+    expect(seedTaskC.status).toBe(200);
+
+    const treeBeforeApprove = await apiJson<ProjectTree>(`/api/projects/${projectId}/tree`);
+    const taskC = treeBeforeApprove.body.nodes.find((n) => n.title === 'Task C')!;
+    expect(taskC).toBeDefined();
+    expect(taskC.status).toBe('planned');
+
+    const approvedSub = await apiJson<{ node: PlanNode }>(
+      `/api/projects/${projectId}/nodes/${subMod.id}/approve`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      }
+    );
+    expect(approvedSub.status).toBe(200);
+    expect(approvedSub.body.node.status).toBe('done');
+
+    const treeAfterApprove = await apiJson<ProjectTree>(`/api/projects/${projectId}/tree`);
+    const byIdAfterApprove = new Map(treeAfterApprove.body.nodes.map((n) => [n.id, n]));
+    expect(byIdAfterApprove.get(taskC.id)?.status).toBe('done');
+    expect(byIdAfterApprove.get(rootMod.id)?.status).toBe('done');
+
+    await apiJson(`/api/projects/${projectId}`, { method: 'DELETE' });
+  });
+
+  test('migrates legacy schema without previous_status safely and supports AI-safe reopen undo', async () => {
+    const legacyDbPath = path.join(tempDir, 'legacy-prev-status.db');
+    const legacyDb = new Database(legacyDbPath, { create: true, strict: true });
+
+    try {
+      legacyDb.exec(`
+        CREATE TABLE projects (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          summary TEXT DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE groups (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE nodes (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          group_id TEXT REFERENCES groups(id) ON DELETE SET NULL,
+          parent_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+          node_type TEXT NOT NULL CHECK (node_type IN ('module', 'task', 'revision')),
+          title TEXT NOT NULL,
+          description TEXT DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'in_progress', 'needs_review', 'done')),
+          scope_files TEXT NOT NULL DEFAULT '[]',
+          rules TEXT DEFAULT '',
+          checklist TEXT NOT NULL DEFAULT '[]',
+          ai_report TEXT DEFAULT '',
+          human_feedback TEXT DEFAULT '',
+          review_history TEXT NOT NULL DEFAULT '[]',
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      legacyDb.run(
+        `INSERT INTO projects (id, name, summary, created_at, updated_at) VALUES ('p-prev', 'Prev Project', '', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')`
+      );
+      legacyDb.run(
+        `INSERT INTO nodes (id, project_id, node_type, title, status, ai_report, sort_order, created_at, updated_at)
+         VALUES ('n-legacy-done', 'p-prev', 'task', 'Legacy Done Task', 'done', 'Completed work', 0, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')`
+      );
+
+      initSchema(legacyDb);
+      const cols = legacyDb
+        .query<{ name: string }, []>('PRAGMA table_info(nodes)')
+        .all()
+        .map((c) => c.name);
+      expect(cols).toContain('previous_status');
+
+      const legacyNode = getNodeById('p-prev', 'n-legacy-done', legacyDb)!;
+      expect(legacyNode.previous_status).toBeNull();
+    } finally {
+      legacyDb.close(false);
+    }
+
+    // Full HTTP + MCP lifecycle for leaf undo, reopen with reason, parent selective undo, and 400 guard
+    const createdProj = await apiJson<{ project: { id: string } }>('/api/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Reopen Test Project' }),
+    });
+    expect(createdProj.status).toBe(201);
+    const projectId = createdProj.body.project.id;
+
+    const seedRes = await apiJson<{ result: { content: Array<{ text: string }> } }>(
+      `/mcp/${projectId}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'upsert_plan',
+            arguments: {
+              group_name: 'Phase 1',
+              nodes: [
+                {
+                  node_type: 'module',
+                  title: 'Parent Mod',
+                  children: [
+                    { node_type: 'task', title: 'Task 1' },
+                    { node_type: 'task', title: 'Task 2' },
+                  ],
+                },
+              ],
+            },
+          },
+        }),
+      }
+    );
+    expect(seedRes.status).toBe(200);
+
+    const tree1 = await apiJson<ProjectTree>(`/api/projects/${projectId}/tree`);
+    const parentMod = tree1.body.nodes.find((n) => n.title === 'Parent Mod')!;
+    const task1 = tree1.body.nodes.find((n) => n.title === 'Task 1')!;
+    const task2 = tree1.body.nodes.find((n) => n.title === 'Task 2')!;
+
+    // Reopening a non-done node must return HTTP 400
+    const nonDoneReopen = await apiJson<{ error: string }>(
+      `/api/projects/${projectId}/nodes/${task1.id}/reopen`,
+      { method: 'POST' }
+    );
+    expect(nonDoneReopen.status).toBe(400);
+
+    // Move Task 1 through start_node -> submit_for_review -> needs_review -> approve (done)
+    await apiJson(`/mcp/${projectId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'start_node', arguments: { node_id: task1.id } },
+      }),
+    });
+    await apiJson(`/mcp/${projectId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: {
+          name: 'submit_for_review',
+          arguments: { node_id: task1.id, ai_report: 'Implemented Task 1' },
+        },
+      }),
+    });
+
+    const approvedTask1 = await apiJson<{ node: PlanNode }>(
+      `/api/projects/${projectId}/nodes/${task1.id}/approve`,
+      { method: 'POST' }
+    );
+    expect(approvedTask1.status).toBe(200);
+    expect(approvedTask1.body.node.status).toBe('done');
+    expect(approvedTask1.body.node.previous_status).toBe('needs_review');
+
+    // 1) Undo without reason -> restores exact needs_review, clears previous_status, empty human_feedback, appends reopened
+    const undoneTask1 = await apiJson<{ node: PlanNode; reopened_count: number }>(
+      `/api/projects/${projectId}/nodes/${task1.id}/reopen`,
+      { method: 'POST' }
+    );
+    expect(undoneTask1.status).toBe(200);
+    expect(undoneTask1.body.reopened_count).toBe(1);
+    expect(undoneTask1.body.node.status).toBe('needs_review');
+    expect(undoneTask1.body.node.previous_status).toBeNull();
+    expect(undoneTask1.body.node.human_feedback).toBe('');
+    expect(undoneTask1.body.node.review_history.at(-1)?.type).toBe('reopened');
+    expect(undoneTask1.body.node.review_history.at(-1)?.content).toContain(
+      'human undo — no revision requested'
+    );
+
+    // Check MCP get_node_context renders **Reopened**
+    const ctxAfterUndo = await apiJson<{ result: { content: Array<{ text: string }> } }>(
+      `/mcp/${projectId}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 4,
+          method: 'tools/call',
+          params: { name: 'get_node_context', arguments: { node_id: task1.id } },
+        }),
+      }
+    );
+    expect(ctxAfterUndo.body.result.content[0]?.text).toContain('**Reopened**');
+
+    // 2) Approve Task 1 again, then reopen WITH reason -> sets in_progress + human_feedback, parent rolls up to in_progress
+    await apiJson(`/api/projects/${projectId}/nodes/${task1.id}/approve`, {
+      method: 'POST',
+    });
+    const reopenedWithReason = await apiJson<{ node: PlanNode }>(
+      `/api/projects/${projectId}/nodes/${task1.id}/reopen`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'Edge case fails on empty payload' }),
+      }
+    );
+    expect(reopenedWithReason.status).toBe(200);
+    expect(reopenedWithReason.body.node.status).toBe('in_progress');
+    expect(reopenedWithReason.body.node.previous_status).toBeNull();
+    expect(reopenedWithReason.body.node.human_feedback).toBe(
+      'Edge case fails on empty payload'
+    );
+    expect(reopenedWithReason.body.node.review_history.at(-1)?.type).toBe('reopened');
+
+    // PATCHing status -> done clears stale human_feedback and appends Approved (Done)
+    const patchedToDone = await apiJson<{ node: PlanNode }>(
+      `/api/projects/${projectId}/nodes/${task1.id}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'done' }),
+      }
+    );
+    expect(patchedToDone.status).toBe(200);
+    expect(patchedToDone.body.node.status).toBe('done');
+    expect(patchedToDone.body.node.previous_status).toBe('in_progress');
+    expect(patchedToDone.body.node.human_feedback).toBe('');
+    expect(patchedToDone.body.node.review_history.at(-1)?.type).toBe('approved');
+    expect(patchedToDone.body.node.review_history.at(-1)?.content).toBe('Approved (Done)');
+
+    // 3) Parent cascade Done + Reopen (cascade_scope default preserves earlier legitimately done Task 1)
+    // First approve Task 1 legitimately while Task 2 remains planned
+    await apiJson(`/api/projects/${projectId}/nodes/${task1.id}/approve`, {
+      method: 'POST',
+    });
+    // Now mark Parent Mod Done (cascades Done to Task 2, saving previous_status = 'planned')
+    const parentDone = await apiJson<{ node: PlanNode }>(
+      `/api/projects/${projectId}/nodes/${parentMod.id}/approve`,
+      { method: 'POST' }
+    );
+    expect(parentDone.status).toBe(200);
+    expect(parentDone.body.node.status).toBe('done');
+
+    const treeWhileDone = await apiJson<ProjectTree>(`/api/projects/${projectId}/tree`);
+    const task2Cascaded = treeWhileDone.body.nodes.find((n) => n.id === task2.id)!;
+    expect(task2Cascaded.status).toBe('done');
+    expect(task2Cascaded.previous_status).toBe('planned');
+
+    // Reopen Parent Mod with default scope -> reverts only cascaded Task 2 back to 'planned', keeps Task 1 'done', Parent Mod becomes 'in_progress'
+    const parentReopened = await apiJson<{ node: PlanNode; reopened_count: number }>(
+      `/api/projects/${projectId}/nodes/${parentMod.id}/reopen`,
+      { method: 'POST' }
+    );
+    expect(parentReopened.status).toBe(200);
+    expect(parentReopened.body.reopened_count).toBe(2);
+    expect(parentReopened.body.node.status).toBe('in_progress');
+
+    const treeAfterParentReopen = await apiJson<ProjectTree>(
+      `/api/projects/${projectId}/tree`
+    );
+    const byIdAfter = new Map(treeAfterParentReopen.body.nodes.map((n) => [n.id, n]));
+    expect(byIdAfter.get(task1.id)?.status).toBe('done');
+    expect(byIdAfter.get(task2.id)?.status).toBe('planned');
+    expect(byIdAfter.get(task2.id)?.previous_status).toBeNull();
+    expect(byIdAfter.get(parentMod.id)?.status).toBe('in_progress');
+
+    await apiJson(`/api/projects/${projectId}`, { method: 'DELETE' });
+  });
 });

@@ -64,7 +64,7 @@ export function TopBar({
             VibeDeck
           </span>
           <span className="rounded border border-[#272B36] bg-[#111318] px-1.5 py-0.5 font-mono text-[10px] leading-none text-[#8B92A5]">
-            v0.1.2
+            v0.1.3
           </span>
         </div>
 

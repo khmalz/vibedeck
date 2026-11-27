@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   title TEXT NOT NULL,
   description TEXT DEFAULT '',
   status TEXT NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'in_progress', 'needs_review', 'done')),
+  previous_status TEXT DEFAULT NULL CHECK (previous_status IS NULL OR previous_status IN ('planned', 'in_progress', 'needs_review')),
   scope_files TEXT NOT NULL DEFAULT '[]',
   rules TEXT DEFAULT '',
   checklist TEXT NOT NULL DEFAULT '[]',
@@ -229,9 +230,24 @@ function syncModuleStatuses(db: Database): void {
   }
 }
 
+/** Safely add previous_status column to existing nodes tables without losing data. */
+function migrateNodesPreviousStatus(db: Database): void {
+  const columns = db
+    .query<{ name: string }, []>('PRAGMA table_info(nodes)')
+    .all()
+    .map((col) => col.name);
+
+  if (columns.includes('previous_status')) {
+    return;
+  }
+
+  db.exec('ALTER TABLE nodes ADD COLUMN previous_status TEXT;');
+}
+
 /** Initialize idempotent SQLite tables, indexes, and backward-compatible migrations. */
 export function initSchema(db: Database): void {
   db.exec(SCHEMA_SQL);
   migrateNodesReviewHistory(db);
+  migrateNodesPreviousStatus(db);
   syncModuleStatuses(db);
 }
